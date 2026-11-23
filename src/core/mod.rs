@@ -20,10 +20,23 @@ pub enum Mode {
     Interactive,
 }
 
-/// Gamepad input, normalized (M2 fills this in; PLAN.md §3).
-#[allow(dead_code)] // constructed by M2; defined now so the boundary is fixed
+/// Gamepad input, normalized (M2, PLAN.md §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PadEvent;
+pub struct PadEvent {
+    pub device_index: u8,
+    pub kind: PadEventKind,
+}
+
+/// Kind of normalized pad event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadEventKind {
+    /// A button was pressed (value 1).
+    ButtonPressed(u16),
+    /// A button was released (value 0).
+    ButtonReleased(u16),
+    /// An absolute axis moved (normalized -127..=127 for hats/sticks).
+    AxisMoved(u16, i8),
+}
 
 /// IPC message from the unix socket (M1, PLAN.md §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +209,10 @@ mod tests {
         for ev in [
             Event::Tick,
             Event::SurfaceConfigured,
-            Event::Pad(PadEvent),
+            Event::Pad(PadEvent {
+                device_index: 0,
+                kind: PadEventKind::ButtonPressed(0),
+            }),
             Event::Ipc(IpcMsg::Notify),
             Event::Ipc(IpcMsg::Quit),
         ] {

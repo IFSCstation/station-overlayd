@@ -78,6 +78,9 @@ pub struct App {
     signal: LoopSignal,
     /// calloop registration token for the IPC socket source.
     ipc_token: Option<RegistrationToken>,
+    /// Gamepad manager (M2). Enumerates /dev/input, opens gamepads, dispatches
+    /// pad events into the core state machine.
+    pad_manager: crate::pad::PadManager,
     /// The platform-independent state machine (PLAN.md §1).
     state: core::State,
 }
@@ -129,6 +132,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         timer: None,
         signal,
         ipc_token: None,
+        pad_manager: crate::pad::PadManager::new(),
         state: core::State::new(),
     };
 
@@ -157,6 +161,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         },
     )?;
     app.ipc_token = Some(ipc_token);
+
+    // --- Gamepad enumeration (M2) ---------------------------------------
+    let opened = app.pad_manager.enumerate(&loop_handle);
+    if !opened.is_empty() {
+        eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
+    }
 
     event_loop.run(None, &mut app, |_| {})?;
 
@@ -192,8 +202,20 @@ impl App {
         }
     }
 
+    /// Handle a normalized pad event: feed it to the core state machine.
+    /// The summon combo (Select+Start) is already detected by PadManager and
+    /// results in `Event::Toggle` being dispatched directly.
+    pub(crate) fn handle_pad_event(&mut self, ev: core::Event) {
+        self.dispatch_core(ev);
+    }
+
+    pub(crate) fn pad_manager_mut(&mut self) -> &mut crate::pad::PadManager {
+        &mut self.pad_manager
+    }
+
     /// Feed one event to the core state machine and execute the commands it
-    /// returns. In M1, IPC drives Show/Hide/Toggle; pad events arrive in M2.
+    /// returns. IPC drives Show/Hide/Toggle (M1); pad events arrive in M2.
+    /// Pad grab/release arrives in M3.
     fn dispatch_core(&mut self, ev: core::Event) {
         for cmd in self.state.handle(&ev) {
             match cmd {
@@ -202,11 +224,19 @@ impl App {
                 }
                 Command::Hide => {
                     self.hide_surface();
+                    // Release pads when hiding (M3).
+                    self.pad_manager.ungrab_all();
                 }
                 Command::Redraw => {
                     self.request_frame_if_dirty();
                 }
-                Command::GrabPads(_) => {}
+                Command::GrabPads(grab) => {
+                    if grab {
+                        let _ = self.pad_manager.grab_all();
+                    } else {
+                        self.pad_manager.ungrab_all();
+                    }
+                }
             }
         }
     }
