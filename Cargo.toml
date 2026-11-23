@@ -28,10 +28,12 @@ slint = { version = "=1.19.0", default-features = false, features = [
     "unstable-fontique-012",
 ] }
 # xkbcommon disabled: no keyboard input in M0 (layer surface is click-through
-# and has no keyboard interactivity). calloop comes via sctk's re-exports.
+# and has no keyboard interactivity). calloop comes via sctk's re-exports but
+# we also need it directly for `Generic` (IPC socket source) and `Timer`.
 smithay-client-toolkit = { version = "=0.21.1", default-features = false, features = [
     "calloop",
 ] }
+calloop = { version = "=0.14.5", default-features = false }
 # Direct dependency used only for feature unification: forces fontique to
 # dlopen fontconfig instead of linking it, so the binary has no fontconfig
 # link-time dependency (and cross builds need no aarch64 fontconfig).

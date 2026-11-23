@@ -1,9 +1,9 @@
 //! Wayland wiring: one `wlr-layer-shell` surface on the OVERLAY layer, fed
 //! by a single calloop event loop (PLAN.md §2).
 //!
-//! M0 scope: static screen. The surface is created once, rendered on frame
-//! callbacks only when Slint reports dirty state, and left idle (no frame
-//! callbacks, no timers) otherwise.
+//! M1 scope: the surface is created lazily on `Show` and destroyed on `Hide`
+//! (idle RSS ≈ 0). A Unix-socket IPC source feeds show/hide/toggle commands
+//! into the core state machine.
 
 use std::error::Error;
 use std::rc::Rc;
@@ -32,7 +32,11 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
+use crate::core::{self, Command, Event, Mode as CoreMode};
+use crate::ipc;
 use crate::wl::platform::{Argb8888, OverlayWindow};
+use calloop::generic::Generic;
+use calloop::{Interest, Mode, PostAction};
 
 /// Panel size in logical pixels (scale factor 1 for now, PLAN.md §2).
 const WIDTH: u32 = 640;
@@ -50,10 +54,14 @@ pub struct App {
     /// output hotplug handling arrives in M2 (PLAN.md).
     output_state: OutputState,
 
-    layer: LayerSurface,
+    /// `None` when hidden (surface + buffers freed for ~0% CPU / minimal RSS).
+    layer: Option<LayerSurface>,
     pool: Option<SlotPool>,
     buffer: Option<Buffer>,
 
+    /// Slint component, kept alive across show/hide cycles. `None` only
+    /// transiently during construction.
+    ui: Option<crate::Overlay>,
     /// The Slint window adapter (shared with the platform).
     window: Rc<OverlayWindow>,
     /// Set once the compositor has configured the surface; drawing before
@@ -68,13 +76,14 @@ pub struct App {
     /// calloop source for Slint's timers (`duration_until_next_timer_update`).
     timer: Option<RegistrationToken>,
     signal: LoopSignal,
-    /// The platform-independent state machine (PLAN.md §1). In M0 only
-    /// `SurfaceConfigured` is fed to it; IPC/pad events arrive in M1/M2.
-    state: crate::core::State,
+    /// calloop registration token for the IPC socket source.
+    ipc_token: Option<RegistrationToken>,
+    /// The platform-independent state machine (PLAN.md §1).
+    state: core::State,
 }
 
-/// Connect, bind protocols, create the overlay surface, install the Slint
-/// platform and run the single event loop.
+/// Connect, bind protocols, install the Slint platform, bind the IPC socket
+/// and run the single event loop. Starts in Hidden state (no surface).
 pub fn run() -> Result<(), Box<dyn Error>> {
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
@@ -92,27 +101,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
     let output_state = OutputState::new(&globals, &qh);
 
-    // --- the overlay surface -------------------------------------------
-    let surface = compositor.create_surface(&qh);
-    let layer =
-        layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("overlayd"), None);
-    layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-    layer.set_size(WIDTH, HEIGHT);
-    // Never take keyboard focus (PLAN.md §1 Hud state).
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    // An *empty* input region makes the surface click-through: the default
-    // input region is the whole surface (wayland.xml, wl_surface).
-    let input_region = Region::new(&compositor).map_err(|e| format!("region: {e}"))?;
-    layer.set_input_region(Some(input_region.wl_region()));
-    drop(input_region); // copy semantics: safe to destroy right away
-                        // Initial commit with no buffer: the compositor answers with configure.
-    layer.commit();
-
-    // --- Slint: embedded font, custom platform, then the UI --------------
+    // --- Slint: embedded font, custom platform, component ----------------
     let window = crate::wl::platform::install()?;
-    let ui = crate::Overlay::new()?;
-    ui.window().show()?; // keeps the component alive while visible
-    drop(ui);
+    // Do NOT show yet: we start Hidden. `show()` is called on first Show.
+    let ui = Some(crate::Overlay::new()?);
+
+    // --- IPC socket ------------------------------------------------------
+    let listener = ipc::bind_socket()?;
+    // Non-blocking so accept() in the calloop callback never blocks.
+    listener.set_nonblocking(true)?;
 
     let mut app = App {
         _compositor: compositor,
@@ -120,40 +117,150 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         shm,
         registry_state: RegistryState::new(&globals),
         output_state,
-        layer,
+        layer: None,
         pool: None,
         buffer: None,
+        ui,
         window,
         configured: false,
         frame_pending: false,
         qh: qh.clone(),
-        loop_handle,
+        loop_handle: loop_handle.clone(),
         timer: None,
         signal,
-        state: crate::core::State::new(),
+        ipc_token: None,
+        state: core::State::new(),
     };
+
     app.sync_slint_timer();
+
+    // --- IPC source: accept connections, read lines, dispatch commands -----
+    let ipc_token = loop_handle.insert_source(
+        Generic::new(listener, Interest::READ, Mode::Level),
+        move |_readiness, listener, app: &mut App| {
+            // Accept all pending connections (non-blocking listener).
+            loop {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        if let Err(e) = ipc::handle_client(stream, app) {
+                            eprintln!("overlayd: ipc client error: {e}");
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        eprintln!("overlayd: ipc accept error: {e}");
+                        break;
+                    }
+                }
+            }
+            Ok(PostAction::Continue)
+        },
+    )?;
+    app.ipc_token = Some(ipc_token);
+
     event_loop.run(None, &mut app, |_| {})?;
+
+    // Cleanup: remove socket file on shutdown.
+    let _ = ipc::cleanup_socket();
     Ok(())
 }
 
 impl App {
+    /// Handle an IPC message: route state changes to the core state machine,
+    /// handle platform-level actions directly.
+    pub(crate) fn handle_ipc(&mut self, msg: ipc::IpcMsg) {
+        match msg {
+            ipc::IpcMsg::ShowMenu
+            | ipc::IpcMsg::ShowHud
+            | ipc::IpcMsg::Hide
+            | ipc::IpcMsg::Toggle => {
+                let ev = match msg {
+                    ipc::IpcMsg::ShowMenu => Event::Ipc(core::IpcMsg::ShowMenu),
+                    ipc::IpcMsg::ShowHud => Event::Ipc(core::IpcMsg::ShowHud),
+                    ipc::IpcMsg::Hide => Event::Ipc(core::IpcMsg::Hide),
+                    ipc::IpcMsg::Toggle => Event::Ipc(core::IpcMsg::Toggle),
+                    _ => unreachable!(),
+                };
+                self.dispatch_core(ev);
+            }
+            ipc::IpcMsg::Notify(_text) => {
+                // Handled by the notify module (M4). For now just ack.
+            }
+            ipc::IpcMsg::Quit => {
+                self.signal.stop();
+            }
+        }
+    }
+
     /// Feed one event to the core state machine and execute the commands it
-    /// returns. In M0 only `SurfaceConfigured` is ever fed; the Show/Hide
-    /// arms for pad/IPC events are exercised once M1/M2 land.
-    fn dispatch_core(&mut self, ev: crate::core::Event) {
+    /// returns. In M1, IPC drives Show/Hide/Toggle; pad events arrive in M2.
+    fn dispatch_core(&mut self, ev: core::Event) {
         for cmd in self.state.handle(&ev) {
             match cmd {
-                // M0: the surface exists from startup and is always in the
-                // click-through Hud state; M1 creates/destroys it here.
-                crate::core::Command::Show(_) | crate::core::Command::Redraw => {
+                Command::Show(mode) => {
+                    let _ = self.show_surface(mode);
+                }
+                Command::Hide => {
+                    self.hide_surface();
+                }
+                Command::Redraw => {
                     self.request_frame_if_dirty();
                 }
-                // M1: destroy surface + shm pool (PLAN.md §2).
-                crate::core::Command::Hide => {}
-                // M3: EVIOCGRAB on the pads (PLAN.md §3).
-                crate::core::Command::GrabPads(_) => {}
+                Command::GrabPads(_) => {}
             }
+        }
+    }
+
+    /// Create the Wayland layer surface (if missing) and mark Slint visible.
+    /// The actual render happens on the next `configure` callback.
+    fn show_surface(&mut self, _mode: CoreMode) -> Result<(), Box<dyn Error>> {
+        // Keep the Slint component alive while visible.
+        self.ui
+            .as_ref()
+            .expect("ui component")
+            .window()
+            .show()
+            .map_err(|e| format!("slint show: {e}"))?;
+
+        if self.layer.is_some() {
+            // Already visible: just request a redraw.
+            self.request_frame_if_dirty();
+            return Ok(());
+        }
+
+        // --- create the overlay surface ---------------------------------
+        let surface = self._compositor.create_surface(&self.qh);
+        let layer = self._layer_shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some("overlayd"),
+            None,
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        layer.set_size(WIDTH, HEIGHT);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let input_region = Region::new(&self._compositor).map_err(|e| format!("region: {e}"))?;
+        layer.set_input_region(Some(input_region.wl_region()));
+        drop(input_region);
+        layer.commit();
+
+        self.layer = Some(layer);
+        self.request_frame_if_dirty();
+        Ok(())
+    }
+
+    /// Destroy the Wayland surface and free shm buffers (~0% CPU, minimal
+    /// RSS while hidden, PLAN.md §1).
+    fn hide_surface(&mut self) {
+        self.layer = None;
+        self.pool = None;
+        self.buffer = None;
+        self.configured = false;
+        self.frame_pending = false;
+        // Release Slint's extra strong reference on the component.
+        if let Some(ui) = self.ui.as_ref() {
+            let _ = ui.window().hide();
         }
     }
 
@@ -170,12 +277,10 @@ impl App {
     /// content and none is already in flight.
     fn request_frame_if_dirty(&mut self) {
         if self.configured && !self.frame_pending && self.window.needs_redraw() {
-            let surface = self.layer.wl_surface().clone();
+            let surface = self.layer.as_ref().expect("layer").wl_surface().clone();
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             self.frame_pending = true;
-            // The frame request is double-buffered: commit applies it (and,
-            // right after configure, the pending ack_configure).
-            self.layer.commit();
+            self.layer.as_ref().expect("layer").commit();
         }
     }
 
@@ -208,8 +313,6 @@ impl App {
             let buffer = self.buffer.as_ref().expect("buffer just created");
             let pool = self.pool.as_mut().expect("pool just created");
             match buffer.canvas(pool) {
-                // The compositor still reads our only buffer (single-buffered,
-                // PLAN.md: minimal memory). Ask for another frame callback.
                 None => retry_next_frame = true,
                 Some(canvas) => {
                     let stride = w as usize;
@@ -223,10 +326,8 @@ impl App {
                         )
                     };
 
-                    let surface = self.layer.wl_surface().clone();
+                    let surface = self.layer.as_ref().expect("layer").wl_surface().clone();
                     let drew = self.window.draw_if_needed(|renderer| {
-                        // Only dirty regions are rendered (partial redraw)
-                        // and returned as damage.
                         let region = renderer.render(pixels, stride);
                         for (pos, sz) in region.iter() {
                             surface.damage_buffer(pos.x, pos.y, sz.width as i32, sz.height as i32);
@@ -235,10 +336,8 @@ impl App {
                     if drew {
                         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
                         self.frame_pending = true;
-                        // Available canvas implies the slot is inactive, so
-                        // this cannot fail with AlreadyActive.
                         buffer.attach_to(&surface)?;
-                        self.layer.commit();
+                        self.layer.as_ref().expect("layer").commit();
                     }
                 }
             }
@@ -253,10 +352,12 @@ impl App {
     /// be deferred to the next compositor frame).
     fn request_frame(&mut self) {
         if !self.frame_pending {
-            let surface = self.layer.wl_surface().clone();
-            surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-            self.frame_pending = true;
-            self.layer.commit();
+            if let Some(layer) = &self.layer {
+                let surface = layer.wl_surface().clone();
+                surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+                self.frame_pending = true;
+                layer.commit();
+            }
         }
     }
 
@@ -272,8 +373,6 @@ impl App {
         let token = self
             .loop_handle
             .insert_source(Timer::from_duration(next), |_, _, app: &mut Self| {
-                // This source is dropped below; sync re-arms if more timers
-                // remain.
                 app.timer = None;
                 app.slint_tick();
                 TimeoutAction::Drop
@@ -312,6 +411,9 @@ impl CompositorHandler for App {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        if !self.configured {
+            return;
+        }
         self.frame_pending = false;
         self.slint_tick();
         if let Err(e) = self.draw() {
@@ -366,24 +468,14 @@ impl LayerShellHandler for App {
             self.buffer = None;
         }
         self.configured = true;
-        // Marks the view tree dirty; the actual render waits for a frame
-        // callback (PLAN.md §2). Goes through `Window::set_size` so the
-        // adapter receives a `WindowSize` and dispatches `Resized`.
         self.window.window().set_size(new_size);
-        // `set_size` alone may not mark the window dirty if Slint had already
-        // auto-sized to content; explicitly request a redraw so the first
-        // frame renders at the requested size.
         self.window.window().request_redraw();
-        self.dispatch_core(crate::core::Event::SurfaceConfigured);
+        // sctk has already sent ack_configure; commit applies it.
+        self.layer.as_ref().expect("layer").commit();
         // Kick off the initial render directly: KWin (and some compositors)
-        // only deliver frame callbacks once a buffer has been attached, so
-        // waiting for one would deadlock the first paint. Subsequent
-        // redraws are driven by frame callbacks via `CompositorHandler`.
+        // only deliver frame callbacks once a buffer has been attached.
         let _ = self.draw();
         self.slint_tick();
-        // sctk has already sent ack_configure; commit applies it even when
-        // nothing else is pending.
-        self.layer.commit();
     }
 }
 
@@ -392,8 +484,6 @@ impl OutputHandler for App {
         &mut self.output_state
     }
 
-    // Output hotplug/scale tracking is M2 (PLAN.md §3); for M0 the layer
-    // surface just sits at its anchored position.
     fn new_output(
         &mut self,
         _conn: &Connection,
@@ -429,10 +519,8 @@ impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-    // No runtime global hotplug handling yet (seat/output hotplug is M2).
     smithay_client_toolkit::registry_handlers![OutputState];
 }
 
-// One delegate for all sctk protocol objects (registry is separate).
 smithay_client_toolkit::delegate_dispatch2!(App);
 smithay_client_toolkit::delegate_registry!(App);

@@ -25,10 +25,18 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PadEvent;
 
-/// IPC message from the unix socket (M1 fills this in; PLAN.md §5).
-#[allow(dead_code)] // constructed by M1; defined now so the boundary is fixed
+/// IPC message from the unix socket (M1, PLAN.md §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IpcMsg;
+pub enum IpcMsg {
+    ShowMenu,
+    ShowHud,
+    Hide,
+    Toggle,
+    /// Fire-and-forget notification text (handled by the notify module, M4).
+    Notify,
+    /// Shut down the daemon (platform-level, not a core command).
+    Quit,
+}
 
 /// Input into the core. The platform layers translate their native events
 /// into this enum; the core never talks back in platform types.
@@ -90,7 +98,17 @@ impl State {
             } else {
                 Mode::Hidden
             }),
-            Event::Tick | Event::SurfaceConfigured | Event::Pad(_) | Event::Ipc(_) => None,
+            Event::Ipc(IpcMsg::ShowMenu) => Some(Mode::Interactive),
+            Event::Ipc(IpcMsg::ShowHud) => Some(Mode::Hud),
+            Event::Ipc(IpcMsg::Hide) => Some(Mode::Hidden),
+            Event::Ipc(IpcMsg::Toggle) => Some(if self.mode == Mode::Hidden {
+                self.last_visible
+            } else {
+                Mode::Hidden
+            }),
+            // Notify and Quit are handled at the platform layer, not core.
+            Event::Ipc(IpcMsg::Notify | IpcMsg::Quit) => None,
+            Event::Tick | Event::SurfaceConfigured | Event::Pad(_) => None,
         };
         let Some(target) = target else {
             return Vec::new();
@@ -179,10 +197,32 @@ mod tests {
             Event::Tick,
             Event::SurfaceConfigured,
             Event::Pad(PadEvent),
-            Event::Ipc(IpcMsg),
+            Event::Ipc(IpcMsg::Notify),
+            Event::Ipc(IpcMsg::Quit),
         ] {
             assert_eq!(s.handle(&ev), vec![]);
         }
         assert_eq!(s.mode(), Mode::Hidden);
+    }
+
+    #[test]
+    fn ipc_messages_map_to_commands() {
+        let mut s = State::new();
+        assert_eq!(
+            s.handle(&Event::Ipc(IpcMsg::ShowMenu)),
+            vec![Command::Show(Mode::Interactive)]
+        );
+        assert_eq!(s.mode(), Mode::Interactive);
+        assert_eq!(
+            s.handle(&Event::Ipc(IpcMsg::ShowHud)),
+            vec![Command::Show(Mode::Hud)]
+        );
+        assert_eq!(s.mode(), Mode::Hud);
+        assert_eq!(s.handle(&Event::Ipc(IpcMsg::Toggle)), vec![Command::Hide]);
+        assert_eq!(s.mode(), Mode::Hidden);
+        assert_eq!(
+            s.handle(&Event::Ipc(IpcMsg::Toggle)),
+            vec![Command::Show(Mode::Hud)]
+        );
     }
 }
