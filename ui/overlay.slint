@@ -1,0 +1,49 @@
+// M0 spike screen (PLAN.md): a translucent rounded panel with text.
+//
+// Importing the TTF makes slint-build pre-rasterize the glyphs of this file
+// into the generated code (renderer-software build pass), so the runtime
+// never loads a font from disk or from fontconfig.
+//
+// Note: Slint parses 8-hex-digit colors as #AARRGGBB, so alpha goes in the
+// most significant byte: #d9101018 = alpha 0xd9 over color #101018.
+
+import "fonts/Roboto-Regular.ttf";
+
+export component Overlay inherits Window {
+    // Overlay: only the rounded panel is painted, the rest stays fully
+    // transparent so the desktop shows through (root background transparent,
+    // shm buffer starts zeroed = transparent).
+    background: transparent;
+    default-font-family: "Roboto";
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 16px;
+        background: #d9101018;
+        border-width: 2px;
+        border-color: #5ac8fa;
+
+        Text {
+            text: "overlayd";
+            font-family: "Roboto";
+            font-size: 32px;
+            color: #ffffff;
+            width: parent.width - 48px;
+            x: 24px;
+            y: parent.height / 2 - self.height - 6px;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "M0 spike: SoftwareRenderer → wl_shm (ARGB8888)";
+            font-family: "Roboto";
+            font-size: 14px;
+            color: #b8b8c8;
+            width: parent.width - 48px;
+            x: 24px;
+            y: parent.height / 2 + 6px;
+            horizontal-alignment: center;
+        }
+    }
+}
