@@ -9,7 +9,7 @@ use std::rc::Rc;
 use slint::platform::software_renderer::{
     PremultipliedRgbaColor, RepaintBufferType, SoftwareRenderer, TargetPixel,
 };
-use slint::platform::{Platform, PlatformError, Renderer, WindowAdapter, WindowEvent};
+use slint::platform::{Key, Platform, PlatformError, Renderer, WindowAdapter, WindowEvent};
 use slint::{PhysicalSize, Window, WindowSize};
 
 /// One pixel in Wayland `wl_shm` `Argb8888` format.
@@ -122,6 +122,18 @@ impl WindowAdapter for OverlayWindow {
 
     fn renderer(&self) -> &dyn Renderer {
         &self.renderer
+    }
+}
+
+/// Dispatch a key event into Slint's view tree (M3 nav translation).
+impl OverlayWindow {
+    pub fn dispatch_key(&self, key: Key, pressed: bool) {
+        let event = if pressed {
+            WindowEvent::KeyPressed { text: key.into() }
+        } else {
+            WindowEvent::KeyReleased { text: key.into() }
+        };
+        self.window.dispatch_event(event);
     }
 }
 

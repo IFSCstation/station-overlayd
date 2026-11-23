@@ -74,6 +74,9 @@ impl SummonDetector {
 /// `PadManager.devices`).
 struct PadDeviceState {
     summon: SummonDetector,
+    /// Last hat direction per axis code, used to send key press/release
+    /// transitions instead of repeating on every event.
+    last_hat: HashMap<u16, i8>,
 }
 
 /// Manages all gamepad devices: enumeration, open/close, dispatch.
@@ -226,7 +229,13 @@ impl PadManager {
 
         self.devices.insert(index, device);
         self.paths.insert(index, path.to_path_buf());
-        self.state.insert(index, PadDeviceState { summon });
+        self.state.insert(
+            index,
+            PadDeviceState {
+                summon,
+                last_hat: HashMap::new(),
+            },
+        );
         Ok(index)
     }
 
@@ -245,9 +254,18 @@ impl PadManager {
         self.state.remove(&index);
     }
 
+    /// Check if an axis reading represents a state transition (press or
+    /// release). Returns `Some(true)` on press, `Some(false)` on release,
+    /// `None` if no change.
     #[allow(dead_code)]
-    pub fn device_count(&self) -> usize {
-        self.devices.len()
+    pub fn check_axis_transition(&mut self, index: u8, code: u16, value: i8) -> Option<bool> {
+        let state = self.state.get_mut(&index)?;
+        let prev = state.last_hat.insert(code, value);
+        match (prev, value) {
+            (Some(0), v) if v != 0 => Some(true), // press
+            (Some(_), 0) => Some(false),          // release
+            _ => None,                            // no change or still active
+        }
     }
 
     /// Grab all pads (EVIOCGRAB). Called when entering Interactive (M3).

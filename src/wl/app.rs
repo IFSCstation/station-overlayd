@@ -9,6 +9,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::time::Duration;
 
+use slint::platform::Key;
 use slint::platform::WindowAdapter;
 use slint::ComponentHandle;
 use smithay_client_toolkit::compositor::{
@@ -202,11 +203,81 @@ impl App {
         }
     }
 
-    /// Handle a normalized pad event: feed it to the core state machine.
-    /// The summon combo (Select+Start) is already detected by PadManager and
-    /// results in `Event::Toggle` being dispatched directly.
+    /// Handle a normalized pad event: feed it to the core state machine and,
+    /// when in Interactive mode, translate D-pad/buttons to Slint key events
+    /// for menu navigation (M3).
     pub(crate) fn handle_pad_event(&mut self, ev: core::Event) {
+        let is_interactive = self.state.mode() == core::Mode::Interactive;
+
+        // Translate pad events to Slint key events when Interactive.
+        if is_interactive {
+            if let core::Event::Pad(pad) = &ev {
+                match pad.kind {
+                    core::PadEventKind::ButtonPressed(code)
+                    | core::PadEventKind::ButtonReleased(code) => {
+                        let pressed = matches!(pad.kind, core::PadEventKind::ButtonPressed(_));
+                        self.translate_button(code, pressed);
+                    }
+                    core::PadEventKind::AxisMoved(code, value) => {
+                        self.translate_axis(code, value, pad.device_index);
+                    }
+                }
+            }
+        }
+
         self.dispatch_core(ev);
+    }
+
+    /// Translate an evdev button code to a Slint key event.
+    fn translate_button(&self, code: u16, pressed: bool) {
+        let key = match code {
+            // Xbox/PlayStation cross button → Return (activate)
+            0x130 => Key::Return, // BTN_SOUTH
+            // Circle/B → Escape (back)
+            0x134 => Key::Escape, // BTN_EAST
+            // Start → Return
+            0x13b => Key::Return, // BTN_START
+            _ => return,
+        };
+        self.window.dispatch_key(key, pressed);
+    }
+
+    /// Translate an evdev absolute axis to directional key events.
+    fn translate_axis(&mut self, code: u16, value: i8, device_index: u8) {
+        let (key, _active) = match code {
+            0x10 => {
+                // ABS_HAT0X
+                if value < 0 {
+                    (Key::LeftArrow, true)
+                } else if value > 0 {
+                    (Key::RightArrow, true)
+                } else {
+                    (Key::LeftArrow, false)
+                }
+            }
+            0x11 => {
+                // ABS_HAT0Y
+                if value < 0 {
+                    (Key::UpArrow, true)
+                } else if value > 0 {
+                    (Key::DownArrow, true)
+                } else {
+                    (Key::UpArrow, false)
+                }
+            }
+            _ => return,
+        };
+        // Only send press/release on state transitions.
+        if let Some(pressed) = self
+            .pad_manager
+            .check_axis_transition(device_index, code, value)
+        {
+            if pressed {
+                self.window.dispatch_key(key, true);
+            } else {
+                self.window.dispatch_key(key, false);
+            }
+        }
     }
 
     pub(crate) fn pad_manager_mut(&mut self) -> &mut crate::pad::PadManager {
