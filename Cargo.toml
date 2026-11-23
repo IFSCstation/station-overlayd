@@ -1,0 +1,51 @@
+[package]
+name = "overlayd"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight Wayland overlay daemon"
+license = "MIT"
+build = "build.rs"
+
+# Single crate, modules split by directory (PLAN.md §Crate layout).
+# Compiled-in modules are gated by features as they land (mod-menu, ...);
+# M0 has none yet.
+[features]
+default = []
+
+[dependencies]
+# Pinned exactly: Slint's platform API and feature names change between
+# releases (PLAN.md "How to work"). Custom platform, software renderer only —
+# no winit/Qt/linuxkms backends, no GL.
+slint = { version = "=1.19.0", default-features = false, features = [
+    "std",
+    "renderer-software",
+    # Slint refuses to compile without a compat feature; this one is empty
+    # (no code, no deps) and only locks the language/API compatibility level.
+    "compat-1-18",
+    # Gives us slint::fontique_012::set_shared_collection(), used to supply an
+    # embedded-font-only collection so the runtime never discovers system
+    # fonts (PLAN: "Embed a single font; do not depend on fontconfig").
+    "unstable-fontique-012",
+] }
+# xkbcommon disabled: no keyboard input in M0 (layer surface is click-through
+# and has no keyboard interactivity). calloop comes via sctk's re-exports.
+smithay-client-toolkit = { version = "=0.21.1", default-features = false, features = [
+    "calloop",
+] }
+# Direct dependency used only for feature unification: forces fontique to
+# dlopen fontconfig instead of linking it, so the binary has no fontconfig
+# link-time dependency (and cross builds need no aarch64 fontconfig).
+# The runtime never calls it: we supply a `system_fonts: false` collection.
+fontique = { version = "=0.12.0", default-features = false, features = [
+    "fontconfig-dlopen",
+] }
+
+[build-dependencies]
+slint-build = "=1.19.0"
+
+[profile.release]
+opt-level = "s" # try "z" and "3" and measure (PLAN.md)
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
