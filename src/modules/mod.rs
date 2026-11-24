@@ -19,11 +19,13 @@ pub mod notify;
 pub enum ModuleCommand {
     /// No command.
     #[default]
+    #[allow(dead_code)]
     None,
     /// Switch to a different module by ID.
     #[allow(dead_code)]
     SwitchTo(&'static str),
     /// Hide the overlay (back to Hidden state).
+    #[allow(dead_code)]
     Hide,
 }
 
@@ -31,8 +33,10 @@ pub enum ModuleCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handled {
     /// The module consumed the event; no further processing.
+    #[allow(dead_code)]
     Yes,
     /// The module did not consume the event; pass it on.
+    #[allow(dead_code)]
     No,
 }
 
@@ -61,6 +65,7 @@ impl ModuleRegistry {
     }
 
     /// Register a module (called once at startup).
+    #[allow(dead_code)]
     pub fn register(&mut self, module: Box<dyn Module>) {
         self.modules.push(module);
     }
