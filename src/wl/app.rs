@@ -82,6 +82,8 @@ pub struct App {
     /// Gamepad manager (M2). Enumerates /dev/input, opens gamepads, dispatches
     /// pad events into the core state machine.
     pad_manager: crate::pad::PadManager,
+    /// Compiled-in overlay modules (M4). Gated by Cargo features.
+    modules: crate::modules::ModuleRegistry,
     /// The platform-independent state machine (PLAN.md §1).
     state: core::State,
 }
@@ -134,10 +136,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         signal,
         ipc_token: None,
         pad_manager: crate::pad::PadManager::new(),
+        modules: crate::modules::ModuleRegistry::new(),
         state: core::State::new(),
     };
 
     app.sync_slint_timer();
+
+    // --- Register compiled-in modules (M4) -------------------------------
+    #[cfg(any(feature = "mod-menu", feature = "mod-notify"))]
+    crate::modules::register_modules(&mut app.modules);
 
     // --- IPC source: accept connections, read lines, dispatch commands -----
     let ipc_token = loop_handle.insert_source(
@@ -186,7 +193,11 @@ impl App {
             | ipc::IpcMsg::Hide
             | ipc::IpcMsg::Toggle => {
                 let ev = match msg {
-                    ipc::IpcMsg::ShowMenu => Event::Ipc(core::IpcMsg::ShowMenu),
+                    ipc::IpcMsg::ShowMenu => {
+                        // Activate the menu module if compiled in.
+                        self.modules.activate("menu");
+                        Event::Ipc(core::IpcMsg::ShowMenu)
+                    }
                     ipc::IpcMsg::ShowHud => Event::Ipc(core::IpcMsg::ShowHud),
                     ipc::IpcMsg::Hide => Event::Ipc(core::IpcMsg::Hide),
                     ipc::IpcMsg::Toggle => Event::Ipc(core::IpcMsg::Toggle),
@@ -203,11 +214,24 @@ impl App {
         }
     }
 
-    /// Handle a normalized pad event: feed it to the core state machine and,
-    /// when in Interactive mode, translate D-pad/buttons to Slint key events
-    /// for menu navigation (M3).
+    /// Handle a normalized pad event: route through active module first (M4),
+    /// then to the core state machine. When in Interactive mode and a module
+    /// is active, the module gets first crack at the event.
     pub(crate) fn handle_pad_event(&mut self, ev: core::Event) {
         let is_interactive = self.state.mode() == core::Mode::Interactive;
+
+        // Give the active module first crack at pad events when Interactive.
+        if is_interactive {
+            if let core::Event::Pad(_pad) = &ev {
+                if let Some(module) = self.modules.active_module() {
+                    let (handled, cmd) = module.on_event(&ev);
+                    if handled == crate::modules::Handled::Yes {
+                        self.execute_module_command(cmd);
+                        return; // module consumed the event
+                    }
+                }
+            }
+        }
 
         // Translate pad events to Slint key events when Interactive.
         if is_interactive {
@@ -226,6 +250,19 @@ impl App {
         }
 
         self.dispatch_core(ev);
+    }
+
+    /// Execute a command returned by a module.
+    fn execute_module_command(&mut self, cmd: crate::modules::ModuleCommand) {
+        match cmd {
+            crate::modules::ModuleCommand::SwitchTo(id) => {
+                self.switch_module(id);
+            }
+            crate::modules::ModuleCommand::Hide => {
+                self.hide_overlay();
+            }
+            crate::modules::ModuleCommand::None => {}
+        }
     }
 
     /// Translate an evdev button code to a Slint key event.
@@ -282,6 +319,22 @@ impl App {
 
     pub(crate) fn pad_manager_mut(&mut self) -> &mut crate::pad::PadManager {
         &mut self.pad_manager
+    }
+
+    /// Switch to a module by ID. Used by Ctx from Module::on_event.
+    pub(crate) fn switch_module(&mut self, id: &str) {
+        if self.modules.activate(id) {
+            // Show the overlay if hidden.
+            if self.state.mode() == core::Mode::Hidden {
+                let _ = self.show_surface(core::Mode::Interactive);
+            }
+        }
+    }
+
+    /// Hide the overlay (back to Hidden state). Used by Ctx from Module::on_event.
+    pub(crate) fn hide_overlay(&mut self) {
+        self.modules.deactivate();
+        self.handle_ipc(ipc::IpcMsg::Hide);
     }
 
     /// Feed one event to the core state machine and execute the commands it

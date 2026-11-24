@@ -1,0 +1,62 @@
+// Menu module UI (M4). A simple vertical list navigable with D-pad.
+
+import "fonts/Roboto-Regular.ttf";
+
+export component MenuWindow inherits Window {
+    background: transparent;
+    default-font-family: "Roboto";
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #d9101018;
+        border-width: 2px;
+        border-color: #5ac8fa;
+
+        Text {
+            text: "MENU";
+            font-family: "Roboto";
+            font-size: 24px;
+            color: #ffffff;
+            x: 24px;
+            y: 24px;
+        }
+
+        // Menu items (placeholder - real items come from module data)
+        Text {
+            text: "> Item 1";
+            font-family: "Roboto";
+            font-size: 18px;
+            color: #ffffff;
+            x: 24px;
+            y: 70px;
+        }
+
+        Text {
+            text: "  Item 2";
+            font-family: "Roboto";
+            font-size: 18px;
+            color: #b8b8c8;
+            x: 24px;
+            y: 100px;
+        }
+
+        Text {
+            text: "  Item 3";
+            font-family: "Roboto";
+            font-size: 18px;
+            color: #b8b8c8;
+            x: 24px;
+            y: 130px;
+        }
+
+        Text {
+            text: "B = back";
+            font-family: "Roboto";
+            font-size: 14px;
+            color: #888888;
+            x: 24px;
+            y: parent.height - 30px;
+        }
+    }
+}

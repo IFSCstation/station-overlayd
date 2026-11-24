@@ -11,6 +11,10 @@ build = "build.rs"
 # M0 has none yet.
 [features]
 default = []
+# Compiled-in modules are gated by Cargo features as they land.
+# You only pay for what you ship (PLAN.md §6).
+mod-menu = []
+mod-notify = []
 
 [dependencies]
 # Pinned exactly: Slint's platform API and feature names change between
