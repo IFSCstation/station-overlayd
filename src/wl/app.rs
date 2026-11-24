@@ -301,11 +301,10 @@ impl App {
                             } else {
                                 value
                             };
-                            if let Some(pressed) = self.pad_manager.check_axis_transition(
-                                pad.device_index,
-                                code,
-                                dir,
-                            ) {
+                            if let Some(pressed) =
+                                self.pad_manager
+                                    .check_axis_transition(pad.device_index, code, dir)
+                            {
                                 if pressed {
                                     if dir < 0 {
                                         // Left: previous button (wrap around).
@@ -686,9 +685,7 @@ impl App {
 
         let buffer = self.buffer.as_ref().expect("buffer");
         let pool = self.pool.as_mut().expect("pool");
-        let canvas = buffer
-            .canvas(pool)
-            .expect("buffer is free after fallback");
+        let canvas = buffer.canvas(pool).expect("buffer is free after fallback");
         let stride = w as usize;
         // SAFETY: SlotPool aligns slots for the buffer format
         // (Argb8888 → 4 bytes) and the canvas is exactly
@@ -951,10 +948,10 @@ fn logical_size_from_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::logical_size_from_mode;
-    use super::wl_output::Transform;
     use super::analog_direction;
     use super::local_clock_text;
+    use super::logical_size_from_mode;
+    use super::wl_output::Transform;
 
     #[test]
     fn clock_text_is_hh_mm() {
