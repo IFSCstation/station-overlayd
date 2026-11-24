@@ -48,8 +48,8 @@ jobs:
           mkdir -p "$PKG_DIR/usr/lib/systemd/user"
           mkdir -p "$PKG_DIR/etc/overlayd"
 
-          # Cross-compiled binary
-          cp target/aarch64-unknown-linux-gnu/release/overlayd "$PKG_DIR/usr/bin/overlayd"
+          # Cross-compiled binary (runner is ARM64)
+          cp target/release/overlayd "$PKG_DIR/usr/bin/overlayd"
           chmod 755 "$PKG_DIR/usr/bin/overlayd"
 
           # Systemd user template service
