@@ -39,10 +39,6 @@ use crate::wl::platform::{Argb8888, OverlayWindow};
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
 
-/// Panel size in logical pixels (scale factor 1 for now, PLAN.md §2).
-const WIDTH: u32 = 640;
-const HEIGHT: u32 = 360;
-
 pub struct App {
     // sctk state. Kept alive for M1, which destroys and recreates the
     // surface on hide/show (PLAN.md §2).
@@ -54,6 +50,8 @@ pub struct App {
     /// Needed because `wl_surface` events carry `wl_output` enter/leave;
     /// output hotplug handling arrives in M2 (PLAN.md).
     output_state: OutputState,
+    /// Configuration loaded from disk (M5).
+    config: crate::config::Config,
 
     /// `None` when hidden (surface + buffers freed for ~0% CPU / minimal RSS).
     layer: Option<LayerSurface>,
@@ -123,6 +121,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         shm,
         registry_state: RegistryState::new(&globals),
         output_state,
+        config: crate::config::load().unwrap_or_default(),
         layer: None,
         pool: None,
         buffer: None,
@@ -392,7 +391,7 @@ impl App {
             None,
         );
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-        layer.set_size(WIDTH, HEIGHT);
+        layer.set_size(self.config.panel.width, self.config.panel.height);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let input_region = Region::new(&self._compositor).map_err(|e| format!("region: {e}"))?;
         layer.set_input_region(Some(input_region.wl_region()));
@@ -611,7 +610,10 @@ impl LayerShellHandler for App {
     ) {
         // (0, 0) means "your requested size wins".
         let (w, h) = if configure.new_size.0 == 0 || configure.new_size.1 == 0 {
-            (WIDTH as i32, HEIGHT as i32)
+            (
+                self.config.panel.width as i32,
+                self.config.panel.height as i32,
+            )
         } else {
             (configure.new_size.0 as i32, configure.new_size.1 as i32)
         };

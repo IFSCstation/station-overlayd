@@ -1,11 +1,14 @@
 //! `overlayd` — lightweight Wayland overlay daemon (PLAN.md).
 //!
-//! M1: IPC show/hide/toggle via Unix socket at `$XDG_RUNTIME_DIR/overlayd.sock`.
+//! M5: Config file at `$XDG_CONFIG_HOME/overlayd/config.toml`,
+//!     systemd user unit at `packaging/overlayd@.service`,
+//!     HUD mode via `overlayd ctl show hud`.
 //!
 //! Usage:
 //!   overlayd              # run the daemon
 //!   overlayd ctl toggle   # CLI client: send a command and exit
 
+mod config;
 mod core;
 mod ipc;
 mod modules;

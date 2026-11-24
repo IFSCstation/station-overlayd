@@ -50,6 +50,10 @@ fontique = { version = "=0.12.0", default-features = false, features = [
 evdev = { version = "=0.13.2", default-features = false }
 # nix for dup() (pad device FD sharing with calloop) and other POSIX calls.
 nix = { version = "=0.31.3", default-features = false, features = ["fs"] }
+# Config file (M5): TOML via serde + toml, home dir via dirs-next.
+serde = { version = "1.0.225", features = ["derive"] }
+toml = { version = "0.8.23", default-features = false, features = ["parse", "display"] }
+dirs-next = { version = "=2.0.0", default-features = false }
 
 [build-dependencies]
 slint-build = "=1.19.0"
