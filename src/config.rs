@@ -62,7 +62,7 @@ impl Default for SummonConfig {
 }
 
 fn default_summon_buttons() -> Vec<u16> {
-    vec![0x132, 0x133] // BTN_SELECT, BTN_START
+    vec![0x13c] // BTN_MODE: PS / Xbox Guide button
 }
 
 /// Load configuration from disk. Returns defaults if no config file exists.
@@ -123,7 +123,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.panel.width, 640);
         assert_eq!(c.panel.height, 360);
-        assert_eq!(c.summon.buttons, vec![0x132, 0x133]);
+        assert_eq!(c.summon.buttons, vec![0x13c]);
     }
 
     #[test]

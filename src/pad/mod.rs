@@ -44,7 +44,10 @@ impl SummonDetector {
         }
     }
 
-    /// Feed a button event; returns `true` when the summon combo fires.
+    /// Feed a button event; returns `true` when the summon button fires.
+    ///
+    /// The summon button is the PS/Xbox Guide button (`BTN_MODE`, evdev
+    /// `0x13c`). A single press toggles the overlay.
     fn button(&mut self, code: u16, pressed: bool) -> bool {
         let bit = 1u64 << (code % 64);
         if pressed {
@@ -53,17 +56,12 @@ impl SummonDetector {
             self.state.buttons &= !bit;
         }
 
-        let select = KeyCode::BTN_SELECT.0;
-        let start = KeyCode::BTN_START.0;
-        let hold_select = self.state.buttons & (1u64 << (select % 64)) != 0;
-        let hold_start = self.state.buttons & (1u64 << (start % 64)) != 0;
-
-        if hold_select && hold_start {
-            if !self.combo_armed {
-                self.combo_armed = true;
-                return true; // summon fires once per press
-            }
-        } else {
+        let mode = KeyCode::BTN_MODE.0;
+        if pressed && code == mode && !self.combo_armed {
+            self.combo_armed = true;
+            return true; // summon fires once per press
+        }
+        if !pressed && code == mode {
             self.combo_armed = false;
         }
         false
@@ -295,21 +293,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summon_select_start() {
+    fn summon_mode_button() {
         let mut d = SummonDetector::new();
-        assert!(!d.button(KeyCode::BTN_SELECT.0, true));
-        assert!(d.button(KeyCode::BTN_START.0, true));
-        assert!(!d.button(KeyCode::BTN_SELECT.0, false));
-        assert!(!d.button(KeyCode::BTN_START.0, false));
-        assert!(!d.button(KeyCode::BTN_SELECT.0, true));
-        assert!(d.button(KeyCode::BTN_START.0, true));
+        // Pressing BTN_MODE fires once.
+        assert!(d.button(KeyCode::BTN_MODE.0, true));
+        // Holding it down doesn't fire again until release.
+        assert!(!d.button(KeyCode::BTN_MODE.0, true));
+        // Release resets.
+        assert!(!d.button(KeyCode::BTN_MODE.0, false));
+        // Press again fires again.
+        assert!(d.button(KeyCode::BTN_MODE.0, true));
     }
 
     #[test]
-    fn summon_single_button_no_fire() {
+    fn summon_other_button_no_fire() {
         let mut d = SummonDetector::new();
         assert!(!d.button(KeyCode::BTN_START.0, true));
         assert!(!d.button(KeyCode::BTN_SOUTH.0, true));
         assert!(!d.button(KeyCode::BTN_START.0, false));
+        assert!(!d.button(KeyCode::BTN_MODE.0, false));
     }
 }
