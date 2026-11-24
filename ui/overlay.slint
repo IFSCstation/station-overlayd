@@ -25,7 +25,7 @@ export component Overlay inherits Window {
         background: #000000cc;
     }
 
-    // Centralized bottom bar with 3 placeholder square buttons.
+    // Centralized bottom bar with 3 placeholder circle buttons.
     // Bottom padding keeps the buttons clear of the screen's bottom edge.
     Rectangle {
         width: parent.width;
@@ -33,17 +33,20 @@ export component Overlay inherits Window {
         y: parent.height - 96px;
         background: #00000077;
 
-        // 3 × 64px buttons + 2 × 16px gaps = 224px wide; centered.
+        // 3 × 64px circle buttons + 2 × 16px gaps = 224px wide; centered.
+        // border-radius = half the size makes the rectangle a circle.
         Rectangle {
             x: parent.width / 2 - 112px;
             y: 16px;
             width: 64px;
             height: 64px;
+            border-radius: 32px;
             background: #2a2a2a;
 
             Text {
                 text: "\u{e9b2}"; // home
                 font-family: "Material Symbols Rounded";
+                font-size: 48px;
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -55,11 +58,13 @@ export component Overlay inherits Window {
             y: 16px;
             width: 64px;
             height: 64px;
+            border-radius: 32px;
             background: #2a2a2a;
 
             Text {
                 text: "\u{e8b8}"; // settings
                 font-family: "Material Symbols Rounded";
+                font-size: 48px;
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -71,11 +76,13 @@ export component Overlay inherits Window {
             y: 16px;
             width: 64px;
             height: 64px;
+            border-radius: 32px;
             background: #2a2a2a;
 
             Text {
                 text: "\u{e5cd}"; // close
                 font-family: "Material Symbols Rounded";
+                font-size: 48px;
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
