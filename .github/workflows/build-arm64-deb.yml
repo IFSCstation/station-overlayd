@@ -48,8 +48,10 @@ jobs:
           dpkg-deb --info target/debian/*.deb
           dpkg-deb --contents target/debian/*.deb
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload .deb (direct, not zipped)
+        uses: actions/upload-artifact@v7
         with:
-          name: overlayd-arm64-deb
           path: target/debian/*.deb
+          archive: false
+          if-no-files-found: error
           retention-days: 30
