@@ -24,7 +24,7 @@ export component Overlay inherits Window {
     // focused, a small window appears on top of that button with a volume
     // slider. Toggled from Rust on button activation (BTN_SOUTH).
     in-out property <bool> speaker_submenu_open: false;
-    // Volume level 0..=100. Driven by the submenu slider (no OS integration).
+    // Volume level 0..=100. Driven by the submenu slider and synced to the OS.
     in-out property <int> volume_level: 50;
 
     // Full-screen background; transparent where nothing is painted so the

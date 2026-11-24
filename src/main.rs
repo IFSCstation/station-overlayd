@@ -8,6 +8,7 @@
 //!   overlayd              # run the daemon
 //!   overlayd ctl toggle   # CLI client: send a command and exit
 
+mod audio;
 mod config;
 mod core;
 mod ipc;

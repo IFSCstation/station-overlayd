@@ -33,6 +33,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
+use crate::audio;
 use crate::core::{self, Command, Event, Mode as CoreMode};
 use crate::ipc;
 use crate::wl::platform::{Argb8888, OverlayWindow};
@@ -100,7 +101,7 @@ pub struct App {
     focused_button: u8,
     /// Whether the speaker/volume submenu is open.
     speaker_submenu_open: bool,
-    /// Volume level 0..=100 shown in the submenu slider (no OS integration).
+    /// Volume level 0..=100 shown in the submenu slider (synced to the OS).
     volume_level: i32,
 }
 
@@ -323,11 +324,16 @@ impl App {
                                             self.volume_level.saturating_add(step).min(100)
                                         };
                                         if new_level != self.volume_level {
-                                            self.volume_level = new_level;
+                                            // Clamp to 0..=100 so the slider never
+                                            // renders off-track (negative or >100).
+                                            let level = new_level.clamp(0, 100);
+                                            self.volume_level = level;
                                             let _ = self
                                                 .ui
                                                 .as_ref()
-                                                .map(|u| u.set_volume_level(new_level));
+                                                .map(|u| u.set_volume_level(level));
+                                            // Persist to the OS.
+                                            audio::set_volume(level);
                                         }
                                         self.request_frame_if_dirty();
                                         return; // consumed for volume
@@ -366,6 +372,17 @@ impl App {
                             .ui
                             .as_ref()
                             .map(|u| u.set_speaker_submenu_open(self.speaker_submenu_open));
+                        // When opening, reflect the real OS volume on the slider.
+                        if self.speaker_submenu_open {
+                            if let Some(level) = audio::get_volume() {
+                                let level = level.clamp(0, 100);
+                                self.volume_level = level;
+                                let _ = self
+                                    .ui
+                                    .as_ref()
+                                    .map(|u| u.set_volume_level(level));
+                            }
+                        }
                         self.request_frame_if_dirty();
                         return; // consumed
                     }
