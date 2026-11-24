@@ -9,9 +9,11 @@
 //! `Generic` source owns the duplicate FD (used only for poll notification).
 
 use std::collections::HashMap;
+use std::io;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
@@ -75,6 +77,13 @@ struct PadDeviceState {
     /// Last hat direction per axis code, used to send key press/release
     /// transitions instead of repeating on every event.
     last_hat: HashMap<u16, i8>,
+    /// Time of the last error log for this device, used for rate limiting.
+    last_error: Option<Instant>,
+    /// Count of consecutive errors on this device.
+    consecutive_errors: u32,
+    /// True once we have detected ENODEV and removed this device from the
+    /// poll loop; prevents further error logging for it.
+    device_gone: bool,
 }
 
 /// Manages all gamepad devices: enumeration, open/close, dispatch.
@@ -158,26 +167,108 @@ impl PadManager {
         let dup_fd = dup(borrowed)?;
         let summon = SummonDetector::new();
 
+        let path_clone = path.to_path_buf();
         let token = loop_handle.insert_source(
             Generic::new(dup_fd, Interest::READ, Mode::Level),
             move |_readiness, _raw_fd, app: &mut crate::wl::app::App| {
-                // Collect events first, releasing the device borrow before
-                // calling back into App (which borrows pad_manager again).
-                let events = {
+                // Try to fetch events. The Device borrow from fetch_events()
+                // must be released before we can borrow app.pad_manager_mut()
+                // again for error handling.
+                let fetch_result: Result<Vec<evdev::InputEvent>, std::io::Error> = {
                     let Some(device_state) = app.pad_manager_mut().devices.get_mut(&index) else {
                         return Ok(PostAction::Continue);
                     };
                     match device_state.fetch_events() {
-                        Ok(events) => events.collect::<Vec<_>>(),
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            return Ok(PostAction::Continue);
-                        }
-                        Err(e) => {
-                            eprintln!("[overlayd] pad device {index} error: {e}");
-                            return Ok(PostAction::Continue);
-                        }
+                        Ok(ev_iter) => Ok(ev_iter.collect::<Vec<_>>()),
+                        Err(e) => Err(e),
                     }
                 };
+
+                let Ok(events) = fetch_result else {
+                    let err = fetch_result.unwrap_err();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        return Ok(PostAction::Continue);
+                    }
+
+                    let is_enodev = err.kind() == io::ErrorKind::NotFound;
+
+                    // Update error tracking and rate-limited logging.
+                    {
+                        let state = app
+                            .pad_manager_mut()
+                            .state
+                            .get_mut(&index)
+                            .expect("device state exists");
+                        state.consecutive_errors += 1;
+                        let now = Instant::now();
+                        let should_log = state.last_error.is_none_or(|last| {
+                            now.duration_since(last).as_secs() >= 60
+                        });
+
+                        if should_log {
+                            app
+                                .pad_manager_mut()
+                                .state
+                                .get_mut(&index)
+                                .expect("device state exists")
+                                .last_error = Some(now);
+
+                            if is_enodev {
+                                eprintln!(
+                                    "[overlayd] pad device {index} ({path_clone:?}) disconnected: {err}"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[overlayd] pad device {index} ({path_clone:?}) error: {err}"
+                                );
+                            }
+                        }
+                    }
+
+                    // On ENODEV, remove this device from tracking so we stop
+                    // retrying a dead FD.
+                    if is_enodev {
+                        app.pad_manager_mut().tokens.remove(&index);
+                        app.pad_manager_mut().devices.remove(&index);
+                        app.pad_manager_mut().paths.remove(&index);
+                        app.pad_manager_mut().state.remove(&index);
+                        // Tell calloop to remove this source from the event loop.
+                        return Ok(PostAction::Remove);
+                    }
+
+                    return Ok(PostAction::Continue);
+                };
+
+                // Device is alive again; reset error tracking and log
+                // reconnection if we had previously marked it as gone.
+                let was_gone = {
+                    let state = app
+                        .pad_manager_mut()
+                        .state
+                        .get(&index)
+                        .expect("device state exists");
+                    state.device_gone
+                };
+                if was_gone {
+                    let old = app
+                        .pad_manager_mut()
+                        .state
+                        .remove(&index)
+                        .expect("device state exists");
+                    app.pad_manager_mut().state.insert(
+                        index,
+                        PadDeviceState {
+                            summon: old.summon,
+                            last_hat: old.last_hat,
+                            last_error: None,
+                            consecutive_errors: 0,
+                            device_gone: false,
+                        },
+                    );
+                    eprintln!(
+                        "[overlayd] pad device {index} ({path_clone:?}) reconnected"
+                    );
+                }
 
                 for ev in events {
                     match ev.destructure() {
@@ -232,6 +323,9 @@ impl PadManager {
             PadDeviceState {
                 summon,
                 last_hat: HashMap::new(),
+                last_error: None,
+                consecutive_errors: 0,
+                device_gone: false,
             },
         );
         Ok(index)

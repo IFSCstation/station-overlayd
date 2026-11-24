@@ -77,6 +77,8 @@ pub struct App {
     signal: LoopSignal,
     /// calloop registration token for the IPC socket source.
     ipc_token: Option<RegistrationToken>,
+    /// calloop registration token for periodic pad re-enumeration.
+    pad_timer: Option<RegistrationToken>,
     /// Gamepad manager (M2). Enumerates /dev/input, opens gamepads, dispatches
     /// pad events into the core state machine.
     pad_manager: crate::pad::PadManager,
@@ -134,6 +136,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         timer: None,
         signal,
         ipc_token: None,
+        pad_timer: None,
         pad_manager: crate::pad::PadManager::new(),
         modules: crate::modules::ModuleRegistry::new(),
         state: core::State::new(),
@@ -174,6 +177,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     if !opened.is_empty() {
         eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
     }
+
+    // Periodic re-enumeration timer: detects reconnected gamepads so the
+    // overlay keeps working even when no pad is connected at startup.
+    let pad_timer = loop_handle.insert_source(
+        Timer::from_duration(std::time::Duration::from_secs(2)),
+        move |_, _, app: &mut App| {
+            let opened = app.pad_manager.enumerate(&app.loop_handle);
+            if !opened.is_empty() {
+                eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
+            }
+            TimeoutAction::ToDuration(std::time::Duration::from_secs(2))
+        },
+    )?;
+    app.pad_timer = Some(pad_timer);
 
     event_loop.run(None, &mut app, |_| {})?;
 
