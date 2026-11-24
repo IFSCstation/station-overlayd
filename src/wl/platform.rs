@@ -156,12 +156,17 @@ pub fn install() -> Result<Rc<OverlayWindow>, PlatformError> {
     Ok(window)
 }
 
-/// Give Slint a font collection that contains only our embedded font.
+/// Give Slint a font collection that contains only our embedded fonts.
 ///
 /// PLAN.md: "Embed a single font; do not depend on fontconfig." With
 /// `system_fonts: false` the runtime never performs system font discovery,
 /// so fontconfig is never even dlopened. Imported `.slint` fonts are added
 /// by Slint on top of this collection.
+///
+/// Two fonts are embedded:
+///   - Roboto-Regular: the UI text font (mapped to the SansSerif generic family)
+///   - MaterialSymbolsRounded: a subsetted icon font (3 glyphs: home, settings,
+///     close) used by the bottom bar buttons. Referenced by name from Slint.
 fn supply_fonts() -> Result<(), PlatformError> {
     use slint::fontique_012::fontique;
 
@@ -169,15 +174,26 @@ fn supply_fonts() -> Result<(), PlatformError> {
         system_fonts: false,
         ..Default::default()
     });
-    let data = include_bytes!("../../ui/fonts/Roboto-Regular.ttf");
-    let fonts = collection.register_fonts(
-        fontique::Blob::new(std::sync::Arc::new(data.to_vec())),
+
+    // Roboto — the UI text font.
+    let roboto_data = include_bytes!("../../ui/fonts/Roboto-Regular.ttf");
+    let roboto_fonts = collection.register_fonts(
+        fontique::Blob::new(std::sync::Arc::new(roboto_data.to_vec())),
         None,
     );
     collection.set_generic_families(
         fontique::GenericFamily::SansSerif,
-        fonts.iter().map(|(family_id, _)| *family_id),
+        roboto_fonts.iter().map(|(family_id, _)| *family_id),
     );
+
+    // Material Symbols Rounded — subsetted icon font (home, settings, close).
+    // Registered by name so Slint can resolve `font-family: "Material Symbols Rounded"`.
+    let icons_data = include_bytes!("../../ui/fonts/MaterialSymbolsRounded.ttf");
+    collection.register_fonts(
+        fontique::Blob::new(std::sync::Arc::new(icons_data.to_vec())),
+        None,
+    );
+
     // Only fails if a Slint context already exists — impossible this early.
     slint::fontique_012::set_shared_collection(collection)
 }

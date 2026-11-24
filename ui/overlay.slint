@@ -2,10 +2,16 @@
 // into the generated code (renderer-software build pass), so the runtime
 // never loads a font from disk or from fontconfig.
 //
+// Two fonts are embedded:
+//   - Roboto-Regular: UI text font (default-font-family)
+//   - MaterialSymbolsRounded: subsetted icon font (home, settings, close)
+//     used by the bottom bar buttons.
+//
 // Note: Slint parses 8-hex-digit colors as #RRGGBBAA, so #000000cc is
 // transparent black (alpha 0xcc ≈ 80%).
 
 import "fonts/Roboto-Regular.ttf";
+import "fonts/MaterialSymbolsRounded.ttf";
 
 export component Overlay inherits Window {
     // Full-screen background; transparent where nothing is painted so the
@@ -34,34 +40,42 @@ export component Overlay inherits Window {
             width: 64px;
             height: 64px;
             background: #2a2a2a;
+
             Text {
-                text: "1";
+                text: "\u{e9b2}"; // home
+                font-family: "Material Symbols Rounded";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
         }
+
         Rectangle {
             x: parent.width / 2 - 32px;
             y: 16px;
             width: 64px;
             height: 64px;
             background: #2a2a2a;
+
             Text {
-                text: "2";
+                text: "\u{e8b8}"; // settings
+                font-family: "Material Symbols Rounded";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
         }
+
         Rectangle {
             x: parent.width / 2 + 48px;
             y: 16px;
             width: 64px;
             height: 64px;
             background: #2a2a2a;
+
             Text {
-                text: "3";
+                text: "\u{e5cd}"; // close
+                font-family: "Material Symbols Rounded";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
