@@ -52,6 +52,13 @@ pub struct App {
     output_state: OutputState,
     /// Configuration loaded from disk (M5).
     config: crate::config::Config,
+    /// The output the visible surface was last seen on (`surface_enter`).
+    /// Used to answer "how big is the screen?" with the output the overlay
+    /// is actually displayed on.
+    active_output: Option<wl_output::WlOutput>,
+    /// Size last requested from the compositor via `set_size`. The
+    /// configure fallback ("your requested size wins") uses exactly this.
+    requested_size: (u32, u32),
 
     /// `None` when hidden (surface + buffers freed for ~0% CPU / minimal RSS).
     layer: Option<LayerSurface>,
@@ -122,13 +129,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Non-blocking so accept() in the calloop callback never blocks.
     listener.set_nonblocking(true)?;
 
+    let config = crate::config::load().unwrap_or_default();
+    let requested_size = (config.panel.width, config.panel.height);
     let mut app = App {
         _compositor: compositor,
         _layer_shell: layer_shell,
         shm,
         registry_state: RegistryState::new(&globals),
         output_state,
-        config: crate::config::load().unwrap_or_default(),
+        config,
+        active_output: None,
+        requested_size,
         layer: None,
         pool: None,
         buffer: None,
@@ -386,6 +397,58 @@ impl App {
         }
     }
 
+    /// Size of the output the overlay is (or will be) shown on, in logical
+    /// pixels. Prefers the output the surface has actually entered; falls
+    /// back to the first output the compositor advertised.
+    fn current_output_size(&self) -> Option<(u32, u32)> {
+        let output = self
+            .active_output
+            .clone()
+            .or_else(|| self.output_state.outputs().next())?;
+        self.output_size(&output)
+    }
+
+    /// One output's size: xdg-output's `logical_size` when the compositor
+    /// provides it, otherwise the current mode corrected for transform and
+    /// scale factor. Queried on every show so a resolution change made while
+    /// the overlay was hidden is picked up (PLAN.md fullscreen requirement).
+    fn output_size(&self, output: &wl_output::WlOutput) -> Option<(u32, u32)> {
+        let info = self.output_state.info(output)?;
+        if let Some((w, h)) = info.logical_size {
+            if w > 0 && h > 0 {
+                return Some((w as u32, h as u32));
+            }
+        }
+        let mode = info
+            .modes
+            .iter()
+            .find(|m| m.current)
+            .or_else(|| info.modes.first())?;
+        Some(logical_size_from_mode(
+            mode.dimensions,
+            info.transform,
+            info.scale_factor,
+        ))
+    }
+
+    /// Re-query the target output's size and resize the visible surface if
+    /// it changed (resolution switch while the overlay is already up).
+    fn refit_surface(&mut self) {
+        if self.layer.is_none() {
+            return; // Hidden: the next show_surface() re-queries anyway.
+        }
+        let Some(size) = self.current_output_size() else {
+            return;
+        };
+        if size == self.requested_size {
+            return;
+        }
+        self.requested_size = size;
+        let layer = self.layer.as_ref().expect("layer");
+        layer.set_size(size.0, size.1);
+        layer.commit();
+    }
+
     /// Create the Wayland layer surface (if missing) and mark Slint visible.
     /// The actual render happens on the next `configure` callback.
     fn show_surface(&mut self, _mode: CoreMode) -> Result<(), Box<dyn Error>> {
@@ -404,6 +467,12 @@ impl App {
         }
 
         // --- create the overlay surface ---------------------------------
+        // Query the screen size right now (not from config): the user may
+        // have changed resolution while the overlay was hidden.
+        let size = self
+            .current_output_size()
+            .unwrap_or((self.config.panel.width, self.config.panel.height));
+        self.requested_size = size;
         let surface = self._compositor.create_surface(&self.qh);
         let layer = self._layer_shell.create_layer_surface(
             &self.qh,
@@ -413,7 +482,7 @@ impl App {
             None,
         );
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-        layer.set_size(self.config.panel.width, self.config.panel.height);
+        layer.set_size(size.0, size.1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let input_region = Region::new(&self._compositor).map_err(|e| format!("region: {e}"))?;
         layer.set_input_region(Some(input_region.wl_region()));
@@ -602,8 +671,12 @@ impl CompositorHandler for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        output: &wl_output::WlOutput,
     ) {
+        // First time the surface lands on an output we know its real size;
+        // re-fit in case the size was queried before outputs were bound.
+        self.active_output = Some(output.clone());
+        self.refit_surface();
     }
 
     fn surface_leave(
@@ -630,12 +703,10 @@ impl LayerShellHandler for App {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // (0, 0) means "your requested size wins".
+        // (0, 0) means "your requested size wins" — the size we last asked
+        // for via set_size (queried from the output at show/refit time).
         let (w, h) = if configure.new_size.0 == 0 || configure.new_size.1 == 0 {
-            (
-                self.config.panel.width as i32,
-                self.config.panel.height as i32,
-            )
+            (self.requested_size.0 as i32, self.requested_size.1 as i32)
         } else {
             (configure.new_size.0 as i32, configure.new_size.1 as i32)
         };
@@ -674,16 +745,23 @@ impl OutputHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        // Resolution/mode changed while visible: re-fit the surface.
+        if self.active_output.as_ref() == Some(&output) {
+            self.refit_surface();
+        }
     }
 
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        if self.active_output.as_ref() == Some(&output) {
+            self.active_output = None;
+        }
     }
 }
 
@@ -702,3 +780,72 @@ impl ProvidesRegistryState for App {
 
 smithay_client_toolkit::delegate_dispatch2!(App);
 smithay_client_toolkit::delegate_registry!(App);
+
+/// Pure `wl_output` mode → logical size math (unit-tested): quarter-turn
+/// transforms swap width/height, then the integer scale factor divides.
+fn logical_size_from_mode(
+    dimensions: (i32, i32),
+    transform: wl_output::Transform,
+    scale_factor: i32,
+) -> (u32, u32) {
+    use wl_output::Transform;
+    let (mut w, mut h) = dimensions;
+    if matches!(
+        transform,
+        Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270
+    ) {
+        std::mem::swap(&mut w, &mut h);
+    }
+    let scale = scale_factor.max(1);
+    ((w / scale).max(0) as u32, (h / scale).max(0) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logical_size_from_mode;
+    use super::wl_output::Transform;
+
+    #[test]
+    fn plain_mode_is_logical_size() {
+        assert_eq!(
+            logical_size_from_mode((1920, 1080), Transform::Normal, 1),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn quarter_turns_swap_dimensions() {
+        for t in [
+            Transform::_90,
+            Transform::_270,
+            Transform::Flipped90,
+            Transform::Flipped270,
+        ] {
+            assert_eq!(logical_size_from_mode((1920, 1080), t, 1), (1080, 1920));
+        }
+        // Half turn and plain flip keep the dimensions.
+        for t in [Transform::_180, Transform::Flipped] {
+            assert_eq!(logical_size_from_mode((1920, 1080), t, 1), (1920, 1080));
+        }
+    }
+
+    #[test]
+    fn scale_factor_divides() {
+        assert_eq!(
+            logical_size_from_mode((3840, 2160), Transform::Normal, 2),
+            (1920, 1080)
+        );
+        assert_eq!(
+            logical_size_from_mode((3840, 2160), Transform::_90, 2),
+            (1080, 1920)
+        );
+    }
+
+    #[test]
+    fn zero_scale_does_not_divide_by_zero() {
+        assert_eq!(
+            logical_size_from_mode((1920, 1080), Transform::Normal, 0),
+            (1920, 1080)
+        );
+    }
+}
