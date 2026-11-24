@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+# Reload systemd user daemon if systemd is running as PID 1
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+# Notify the user about enabling the service
+echo "=== overlayd installed ==="
+echo "To start overlayd as a user service (recommended for Wayland):"
+echo "  systemctl --user daemon-reload"
+echo "  systemctl --user enable overlayd@\$USER.service"
+echo "  systemctl --user start overlayd@\$USER.service"
+echo ""
+echo "Config file installed at /etc/overlayd/config.toml"
+echo "Copy it to ~/.config/overlayd/config.toml and edit as needed."
+echo "=========================="
+
+exit 0

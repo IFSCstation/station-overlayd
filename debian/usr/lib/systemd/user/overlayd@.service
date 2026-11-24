@@ -1,0 +1,20 @@
+[Unit]
+Description=overlayd - Lightweight Wayland overlay daemon
+Documentation=man:overlayd(1)
+# graphical-session.target is reached when a graphical (Wayland/X11) session
+# is active. This target exists in user systemd instances.
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/overlayd
+Restart=on-failure
+RestartSec=5
+# Environment from the user session.
+Environment=XDG_RUNTIME_DIR=/run/user/%i
+Environment=XDG_CONFIG_HOME=%h/.config
+Environment=WAYLAND_DISPLAY=wayland-0
+
+[Install]
+WantedBy=graphical-session.target

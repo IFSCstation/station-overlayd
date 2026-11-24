@@ -1,0 +1,9 @@
+# overlayd configuration file
+# Copy to $XDG_CONFIG_HOME/overlayd/config.toml and edit as needed.
+
+[panel]
+width = 640
+height = 360
+
+[summon]
+buttons = [0x13c]

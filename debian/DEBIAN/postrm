@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# Reload systemd daemon
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+echo "overlayd removed. To fully clean up, run:"
+echo "  systemctl --user disable overlayd@\$USER.service 2>/dev/null || true"
+echo "  systemctl --user stop overlayd@\$USER.service 2>/dev/null || true"
+echo "  rm -f ~/.config/systemd/user/overlayd@\$USER.service"
+
+exit 0

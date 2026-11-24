@@ -8,7 +8,7 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/overlayd
+ExecStart=/usr/bin/overlayd
 Restart=on-failure
 RestartSec=5
 # Environment from the user session.
