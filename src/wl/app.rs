@@ -362,9 +362,10 @@ impl App {
                     core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 1 => {
                         // Speaker/volume button: toggle the submenu.
                         self.speaker_submenu_open = !self.speaker_submenu_open;
-                        let _ = self.ui.as_ref().map(|u| u.set_speaker_submenu_open(
-                            self.speaker_submenu_open,
-                        ));
+                        let _ = self
+                            .ui
+                            .as_ref()
+                            .map(|u| u.set_speaker_submenu_open(self.speaker_submenu_open));
                         self.request_frame_if_dirty();
                         return; // consumed
                     }
