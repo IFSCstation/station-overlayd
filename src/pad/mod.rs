@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
-use evdev::{enumerate, Device, EventSummary, KeyCode};
+use evdev::{enumerate, AbsInfo, Device, EventSummary, KeyCode};
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode as StatMode;
 use nix::unistd::dup;
@@ -77,6 +77,10 @@ struct PadDeviceState {
     /// Last hat direction per axis code, used to send key press/release
     /// transitions instead of repeating on every event.
     last_hat: HashMap<u16, i8>,
+    /// Kernel range for each absolute axis, captured at open. Used to
+    /// normalize analog stick values around their real center (which is not
+    /// always zero across controllers).
+    axis_info: HashMap<u16, AbsInfo>,
     /// Time of the last error log for this device, used for rate limiting.
     last_error: Option<Instant>,
     /// Count of consecutive errors on this device.
@@ -158,6 +162,13 @@ impl PadManager {
         if !has_keys && !has_abs {
             return Err("not an input device with keys/axes".into());
         }
+
+        // Capture each axis's kernel range once, so analog sticks can be
+        // normalized to a signed value around their actual center.
+        let axis_info: HashMap<u16, AbsInfo> = device
+            .get_absinfo()
+            .map(|info| info.map(|(code, abs)| (code.0, abs)).collect())
+            .unwrap_or_default();
 
         let index = self.next_index;
         self.next_index += 1;
@@ -260,6 +271,7 @@ impl PadManager {
                         PadDeviceState {
                             summon: old.summon,
                             last_hat: old.last_hat,
+                            axis_info: old.axis_info,
                             last_error: None,
                             consecutive_errors: 0,
                             device_gone: false,
@@ -301,7 +313,22 @@ impl PadManager {
                         }
                         EventSummary::AbsoluteAxis(_, code, value) => {
                             let code = code.0;
-                            let kind = PadEventKind::AxisMoved(code, value.clamp(-127, 127) as i8);
+                            // Left analog stick axes (ABS_X/ABS_Y) are
+                            // normalized around the kernel-reported center so a
+                            // controller whose range is e.g. 0..=255 still
+                            // yields 0 at rest. Other axes (notably the D-pad
+                            // hat) keep the plain clamp.
+                            let normalized = if matches!(code, 0x00 | 0x01) {
+                                let info = app
+                                    .pad_manager_mut()
+                                    .state
+                                    .get(&index)
+                                    .and_then(|s| s.axis_info.get(&code).copied());
+                                normalize_axis(info, value)
+                            } else {
+                                value.clamp(-127, 127) as i8
+                            };
+                            let kind = PadEventKind::AxisMoved(code, normalized);
                             let ev = core::Event::Pad(core::PadEvent {
                                 device_index: index,
                                 kind,
@@ -323,6 +350,7 @@ impl PadManager {
             PadDeviceState {
                 summon,
                 last_hat: HashMap::new(),
+                axis_info,
                 last_error: None,
                 consecutive_errors: 0,
                 device_gone: false,
@@ -354,9 +382,17 @@ impl PadManager {
         let state = self.state.get_mut(&index)?;
         let prev = state.last_hat.insert(code, value);
         match (prev, value) {
-            (Some(0), v) if v != 0 => Some(true), // press
-            (Some(_), 0) => Some(false),          // release
-            _ => None,                            // no change or still active
+            // Neutral to direction = press (includes first call from None).
+            (None, v) if v != 0 => Some(true),
+            (Some(0), v) if v != 0 => Some(true),
+            // Direction to neutral = release.
+            (Some(-1), 0) => Some(false),
+            (Some(1), 0) => Some(false),
+            // Direct opposite direction = press new direction.
+            (Some(-1), 1) => Some(true),
+            (Some(1), -1) => Some(true),
+            // Same direction held or neutral held = no change.
+            _ => None,
         }
     }
 
@@ -380,6 +416,29 @@ impl Default for PadManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Map a raw absolute-axis value to −127..=127 around the axis's real center.
+///
+/// Analog sticks do not share one range: some report −32768..=32767 centered
+/// at 0, others 0..=255 centered at 128. Using the kernel-provided range keeps
+/// 0 meaning "centered" regardless of device. Axes without range info fall
+/// back to the old plain clamp.
+fn normalize_axis(info: Option<AbsInfo>, value: i32) -> i8 {
+    let Some(info) = info else {
+        return value.clamp(-127, 127) as i8;
+    };
+    let (min, max) = (info.minimum(), info.maximum());
+    if max <= min {
+        return value.clamp(-127, 127) as i8;
+    }
+    let center = (min + max) / 2;
+    let half = (max - min) / 2;
+    if half <= 0 {
+        return 0;
+    }
+    let delta = value - center;
+    ((delta * 127) / half).clamp(-127, 127) as i8
 }
 
 #[cfg(test)]
@@ -406,5 +465,84 @@ mod tests {
         assert!(!d.button(KeyCode::BTN_SOUTH.0, true));
         assert!(!d.button(KeyCode::BTN_START.0, false));
         assert!(!d.button(KeyCode::BTN_MODE.0, false));
+    }
+
+    fn test_device_state() -> PadDeviceState {
+        PadDeviceState {
+            summon: SummonDetector::new(),
+            last_hat: HashMap::new(),
+            axis_info: HashMap::new(),
+            last_error: None,
+            consecutive_errors: 0,
+            device_gone: false,
+        }
+    }
+
+    #[test]
+    fn hat_transition_neutral_to_direction() {
+        let mut pm = PadManager::new();
+        pm.state.insert(0, test_device_state());
+        // Neutral to right = press
+        assert_eq!(pm.check_axis_transition(0, 0x10, 1), Some(true));
+        // Still right = no change
+        assert_eq!(pm.check_axis_transition(0, 0x10, 1), None);
+        // Right to neutral = release
+        assert_eq!(pm.check_axis_transition(0, 0x10, 0), Some(false));
+    }
+
+    #[test]
+    fn hat_transition_direct_opposite() {
+        let mut pm = PadManager::new();
+        pm.state.insert(0, test_device_state());
+        // Left = press
+        assert_eq!(pm.check_axis_transition(0, 0x10, -1), Some(true));
+        // Direct left to right = press right
+        assert_eq!(pm.check_axis_transition(0, 0x10, 1), Some(true));
+        // Direct right to left = press left
+        assert_eq!(pm.check_axis_transition(0, 0x10, -1), Some(true));
+    }
+
+    #[test]
+    fn hat_transition_first_call() {
+        let mut pm = PadManager::new();
+        pm.state.insert(0, test_device_state());
+        // First call with direction (no previous state)
+        assert_eq!(pm.check_axis_transition(0, 0x10, 1), Some(true));
+    }
+
+    #[test]
+    fn hat_transition_neutral_to_neutral() {
+        let mut pm = PadManager::new();
+        pm.state.insert(0, test_device_state());
+        // Neutral to neutral = no change (was falsely Some(false) before fix)
+        assert_eq!(pm.check_axis_transition(0, 0x10, 0), None);
+    }
+
+    #[test]
+    fn normalize_axis_centers_signed_range() {
+        // Typical Xbox/8BitDo range: -32768..=32767, centered at 0.
+        let info = AbsInfo::new(0, -32768, 32767, 0, 0, 0);
+        assert_eq!(normalize_axis(Some(info), 0), 0);
+        assert_eq!(normalize_axis(Some(info), 32767), 127);
+        assert_eq!(normalize_axis(Some(info), -32768), -127);
+        assert_eq!(normalize_axis(Some(info), 16000), 62);
+    }
+
+    #[test]
+    fn normalize_axis_centers_unsigned_range() {
+        // DS-style range: 0..=255, centered at 128 (not a zero-centered axis).
+        let info = AbsInfo::new(128, 0, 255, 0, 0, 0);
+        assert_eq!(normalize_axis(Some(info), 127), 0);
+        assert_eq!(normalize_axis(Some(info), 255), 127);
+        assert_eq!(normalize_axis(Some(info), 0), -127);
+        // Resting center must land inside the navigation dead zone.
+        assert!(normalize_axis(Some(info), 128).abs() <= 30);
+    }
+
+    #[test]
+    fn normalize_axis_without_info_falls_back_to_clamp() {
+        assert_eq!(normalize_axis(None, 5000), 127);
+        assert_eq!(normalize_axis(None, -5000), -127);
+        assert_eq!(normalize_axis(None, 0), 0);
     }
 }

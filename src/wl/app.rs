@@ -93,6 +93,9 @@ pub struct App {
     modules: crate::modules::ModuleRegistry,
     /// The platform-independent state machine (PLAN.md §1).
     state: core::State,
+    /// Index of the currently focused bottom-bar button (0 = home, 1 = settings, 2 = close).
+    /// Reset to 0 whenever the overlay is shown.
+    focused_button: u8,
 }
 
 /// Connect, bind protocols, install the Slint platform, bind the IPC socket
@@ -156,6 +159,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         pad_manager: crate::pad::PadManager::new(),
         modules: crate::modules::ModuleRegistry::new(),
         state: core::State::new(),
+        focused_button: 0,
     };
 
     app.sync_slint_timer();
@@ -261,6 +265,64 @@ impl App {
                         self.execute_module_command(cmd);
                         return; // module consumed the event
                     }
+                }
+            }
+        }
+
+        // Gamepad navigation of the bottom bar buttons when the overlay is visible.
+        // The D-pad hat (ABS_HAT0X, 0x10) and the left analog stick X axis
+        // (ABS_X, 0x00) both move focus left/right; BTN_SOUTH activates.
+        let is_visible = self.state.mode() != core::Mode::Hidden;
+        if is_visible {
+            if let core::Event::Pad(pad) = &ev {
+                match pad.kind {
+                    core::PadEventKind::AxisMoved(code, value) => {
+                        if code == 0x10 || code == 0x00 {
+                            // Hat values are already -1/0/1; the analog stick
+                            // is normalized to -127..=127 and needs a dead zone
+                            // so resting jitter does not scroll the bar.
+                            let dir = if code == 0x00 {
+                                analog_direction(value)
+                            } else {
+                                value
+                            };
+                            if let Some(pressed) = self.pad_manager.check_axis_transition(
+                                pad.device_index,
+                                code,
+                                dir,
+                            ) {
+                                if pressed {
+                                    if dir < 0 {
+                                        // Left: previous button (wrap around).
+                                        self.focused_button = if self.focused_button == 0 {
+                                            2
+                                        } else {
+                                            self.focused_button - 1
+                                        };
+                                    } else {
+                                        // Right: next button (wrap around).
+                                        self.focused_button = (self.focused_button + 1) % 3;
+                                    }
+                                    let _ = self
+                                        .ui
+                                        .as_ref()
+                                        .map(|u| u.set_focused_button(self.focused_button as i32));
+                                    self.request_frame_if_dirty();
+                                    return; // consumed for navigation
+                                }
+                            }
+                        }
+                    }
+                    core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 2 => {
+                        // Close button: hide the overlay.
+                        self.hide_overlay();
+                        return; // consumed
+                    }
+                    core::PadEventKind::ButtonPressed(0x130) => {
+                        // BTN_SOUTH on non-close button: consumed, no action.
+                        return; // consumed
+                    }
+                    _ => {}
                 }
             }
         }
@@ -460,6 +522,10 @@ impl App {
             .show()
             .map_err(|e| format!("slint show: {e}"))?;
 
+        // Reset button focus when the overlay is shown.
+        self.focused_button = 0;
+        let _ = self.ui.as_ref().map(|u| u.set_focused_button(0));
+
         if self.layer.is_some() {
             // Already visible: just request a redraw.
             self.request_frame_if_dirty();
@@ -517,18 +583,38 @@ impl App {
         self.sync_slint_timer();
     }
 
-    /// Ask the compositor for the next frame callback if Slint has new
-    /// content and none is already in flight.
+    /// Draw the Slint window into an attached buffer and commit it if dirty.
+    ///
+    /// Every commit carried here attaches a fresh buffer plus damage, so KWin
+    /// (and other compositors that only deliver frame callbacks after a
+    /// buffer-bearing commit) will reliably fire the `wl_surface.frame`
+    /// callback, which `CompositorHandler::frame` turns into the next `draw()`.
+    /// When a frame callback is already in flight we return early: the
+    /// `frame()` handler will call `draw()` once the callback arrives.
     fn request_frame_if_dirty(&mut self) {
-        if self.configured && !self.frame_pending && self.window.needs_redraw() {
-            let surface = self.layer.as_ref().expect("layer").wl_surface().clone();
-            surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-            self.frame_pending = true;
-            self.layer.as_ref().expect("layer").commit();
+        if !self.configured || self.layer.is_none() || !self.window.needs_redraw() {
+            return;
+        }
+        // DEBUG-ONLY: temporary validation logging for KWin; enable with
+        // OVERLAYD_DEBUG=1. Remove once the redraw path is confirmed.
+        let debug = std::env::var_os("OVERLAYD_DEBUG").is_some();
+        if self.frame_pending {
+            if debug {
+                eprintln!("overlayd: redraw skipped: frame callback pending");
+            }
+            return;
+        }
+        if debug {
+            eprintln!("overlayd: redraw: drawing directly with attached buffer");
+        }
+        if let Err(e) = self.draw() {
+            eprintln!("overlayd: draw failed: {e}");
+            self.signal.stop();
         }
     }
 
-    /// Render the window if dirty. Called only from frame callbacks.
+    /// Render the window if dirty. Called from `configure()`, the frame
+    /// callback, and directly from `request_frame_if_dirty()`.
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
         if !self.window.needs_redraw() {
             return Ok(());
@@ -552,57 +638,53 @@ impl App {
             self.buffer = Some(buffer);
         }
 
-        let mut retry_next_frame = false;
-        {
+        // Reuse the current buffer only if the compositor has released it;
+        // otherwise allocate a fresh one. That guarantees every commit below
+        // carries a buffer plus damage, which is what KWin needs in order to
+        // deliver the `wl_surface.frame` callback.
+        let can_reuse = {
             let buffer = self.buffer.as_ref().expect("buffer just created");
             let pool = self.pool.as_mut().expect("pool just created");
-            match buffer.canvas(pool) {
-                None => retry_next_frame = true,
-                Some(canvas) => {
-                    let stride = w as usize;
-                    // SAFETY: SlotPool aligns slots for the buffer format
-                    // (Argb8888 → 4 bytes) and the canvas is exactly
-                    // w*h pixels of Argb8888 (repr(transparent) over u32).
-                    let pixels = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            canvas.as_mut_ptr().cast::<Argb8888>(),
-                            stride * h as usize,
-                        )
-                    };
-
-                    let surface = self.layer.as_ref().expect("layer").wl_surface().clone();
-                    let drew = self.window.draw_if_needed(|renderer| {
-                        let region = renderer.render(pixels, stride);
-                        for (pos, sz) in region.iter() {
-                            surface.damage_buffer(pos.x, pos.y, sz.width as i32, sz.height as i32);
-                        }
-                    });
-                    if drew {
-                        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-                        self.frame_pending = true;
-                        buffer.attach_to(&surface)?;
-                        self.layer.as_ref().expect("layer").commit();
-                    }
-                }
-            }
+            buffer.canvas(pool).is_some()
+        };
+        if !can_reuse {
+            let pool = self.pool.as_mut().expect("pool just created");
+            let (new_buffer, _) = pool
+                .create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)
+                .map_err(|e| format!("wl_shm buffer: {e}"))?;
+            self.buffer = Some(new_buffer);
         }
-        if retry_next_frame {
-            self.request_frame();
+
+        let buffer = self.buffer.as_ref().expect("buffer");
+        let pool = self.pool.as_mut().expect("pool");
+        let canvas = buffer
+            .canvas(pool)
+            .expect("buffer is free after fallback");
+        let stride = w as usize;
+        // SAFETY: SlotPool aligns slots for the buffer format
+        // (Argb8888 → 4 bytes) and the canvas is exactly
+        // w*h pixels of Argb8888 (repr(transparent) over u32).
+        let pixels = unsafe {
+            std::slice::from_raw_parts_mut(
+                canvas.as_mut_ptr().cast::<Argb8888>(),
+                stride * h as usize,
+            )
+        };
+
+        let surface = self.layer.as_ref().expect("layer").wl_surface().clone();
+        let drew = self.window.draw_if_needed(|renderer| {
+            let region = renderer.render(pixels, stride);
+            for (pos, sz) in region.iter() {
+                surface.damage_buffer(pos.x, pos.y, sz.width as i32, sz.height as i32);
+            }
+        });
+        if drew {
+            surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+            self.frame_pending = true;
+            buffer.attach_to(&surface)?;
+            self.layer.as_ref().expect("layer").commit();
         }
         Ok(())
-    }
-
-    /// Request a frame callback without rendering (used when the draw must
-    /// be deferred to the next compositor frame).
-    fn request_frame(&mut self) {
-        if !self.frame_pending {
-            if let Some(layer) = &self.layer {
-                let surface = layer.wl_surface().clone();
-                surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-                self.frame_pending = true;
-                layer.commit();
-            }
-        }
     }
 
     /// (Re)arm the calloop timer that drives Slint's `Timer`s.
@@ -655,6 +737,11 @@ impl CompositorHandler for App {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        // DEBUG-ONLY: temporary validation logging for KWin; enable with
+        // OVERLAYD_DEBUG=1. Remove once the redraw path is confirmed.
+        if std::env::var_os("OVERLAYD_DEBUG").is_some() {
+            eprintln!("overlayd: frame callback fired");
+        }
         if !self.configured {
             return;
         }
@@ -781,6 +868,20 @@ impl ProvidesRegistryState for App {
 smithay_client_toolkit::delegate_dispatch2!(App);
 smithay_client_toolkit::delegate_registry!(App);
 
+/// Map a normalized analog-stick value (−127..=127) to a discrete direction.
+/// Values inside the dead zone are treated as centered so small resting jitter
+/// does not move the focus.
+fn analog_direction(value: i8) -> i8 {
+    const DEAD_ZONE: i8 = 30;
+    if value > DEAD_ZONE {
+        1
+    } else if value < -DEAD_ZONE {
+        -1
+    } else {
+        0
+    }
+}
+
 /// Pure `wl_output` mode → logical size math (unit-tested): quarter-turn
 /// transforms swap width/height, then the integer scale factor divides.
 fn logical_size_from_mode(
@@ -804,6 +905,18 @@ fn logical_size_from_mode(
 mod tests {
     use super::logical_size_from_mode;
     use super::wl_output::Transform;
+    use super::analog_direction;
+
+    #[test]
+    fn analog_direction_applies_dead_zone() {
+        assert_eq!(analog_direction(0), 0);
+        assert_eq!(analog_direction(30), 0);
+        assert_eq!(analog_direction(-30), 0);
+        assert_eq!(analog_direction(31), 1);
+        assert_eq!(analog_direction(-31), -1);
+        assert_eq!(analog_direction(127), 1);
+        assert_eq!(analog_direction(-127), -1);
+    }
 
     #[test]
     fn plain_mode_is_logical_size() {
