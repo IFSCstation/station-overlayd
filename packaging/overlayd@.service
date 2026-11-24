@@ -11,10 +11,11 @@ Type=simple
 ExecStart=/usr/bin/overlayd
 Restart=on-failure
 RestartSec=5
-# Environment from the user session.
-Environment=XDG_RUNTIME_DIR=/run/user/%i
-Environment=XDG_CONFIG_HOME=%h/.config
+# XDG_RUNTIME_DIR is already set correctly by the systemd user manager
+# (/run/user/<uid>); do NOT override it with %i (that is the username).
+# WAYLAND_DISPLAY falls back to wayland-0 inside the daemon if unset.
 Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_CONFIG_HOME=%h/.config
 
 [Install]
 WantedBy=graphical-session.target

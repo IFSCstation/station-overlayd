@@ -95,6 +95,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let loop_handle = event_loop.handle();
     let signal = event_loop.get_signal();
 
+    // Fall back to the standard socket name when WAYLAND_DISPLAY is unset or
+    // empty (e.g. started from systemd/SSH without the session environment).
+    if std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty()) {
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+    }
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init::<App>(&conn)?;
     let qh = event_queue.handle();
