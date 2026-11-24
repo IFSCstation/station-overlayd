@@ -95,9 +95,13 @@ pub struct App {
     modules: crate::modules::ModuleRegistry,
     /// The platform-independent state machine (PLAN.md §1).
     state: core::State,
-    /// Index of the currently focused bottom-bar button (0 = home, 1 = settings, 2 = close).
+    /// Index of the currently focused bottom-bar button (0 = home, 1 = speaker/volume, 2 = close).
     /// Reset to 0 whenever the overlay is shown.
     focused_button: u8,
+    /// Whether the speaker/volume submenu is open.
+    speaker_submenu_open: bool,
+    /// Volume level 0..=100 shown in the submenu slider (no OS integration).
+    volume_level: i32,
 }
 
 /// Connect, bind protocols, install the Slint platform, bind the IPC socket
@@ -163,6 +167,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         modules: crate::modules::ModuleRegistry::new(),
         state: core::State::new(),
         focused_button: 0,
+        speaker_submenu_open: false,
+        volume_level: 50,
     };
 
     app.sync_slint_timer();
@@ -306,6 +312,27 @@ impl App {
                                     .check_axis_transition(pad.device_index, code, dir)
                             {
                                 if pressed {
+                                    // When the speaker submenu is open, left/right
+                                    // adjusts the volume slider instead of moving
+                                    // button focus.
+                                    if self.speaker_submenu_open {
+                                        let step = 10;
+                                        let new_level = if dir < 0 {
+                                            self.volume_level.saturating_sub(step)
+                                        } else {
+                                            self.volume_level.saturating_add(step).min(100)
+                                        };
+                                        if new_level != self.volume_level {
+                                            self.volume_level = new_level;
+                                            let _ = self
+                                                .ui
+                                                .as_ref()
+                                                .map(|u| u.set_volume_level(new_level));
+                                        }
+                                        self.request_frame_if_dirty();
+                                        return; // consumed for volume
+                                    }
+
                                     if dir < 0 {
                                         // Left: previous button (wrap around).
                                         self.focused_button = if self.focused_button == 0 {
@@ -330,6 +357,15 @@ impl App {
                     core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 2 => {
                         // Close button: hide the overlay.
                         self.hide_overlay();
+                        return; // consumed
+                    }
+                    core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 1 => {
+                        // Speaker/volume button: toggle the submenu.
+                        self.speaker_submenu_open = !self.speaker_submenu_open;
+                        let _ = self.ui.as_ref().map(|u| u.set_speaker_submenu_open(
+                            self.speaker_submenu_open,
+                        ));
+                        self.request_frame_if_dirty();
                         return; // consumed
                     }
                     core::PadEventKind::ButtonPressed(0x130) => {

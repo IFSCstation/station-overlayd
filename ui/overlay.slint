@@ -4,7 +4,7 @@
 //
 // Two fonts are embedded:
 //   - Roboto-Regular: UI text font (default-font-family)
-//   - MaterialSymbolsRounded: subsetted icon font (home, settings, close)
+//   - MaterialSymbolsRounded: subsetted icon font (home, speaker/volume, close)
 //     used by the bottom bar buttons.
 //
 // Note: Slint parses 8-hex-digit colors as #RRGGBBAA, so #000000cc is
@@ -15,10 +15,17 @@ import "fonts/MaterialSymbolsRounded.ttf";
 
 export component Overlay inherits Window {
     // Index of the currently focused bottom-bar button
-    // (0 = home, 1 = settings, 2 = close). Updated from Rust on gamepad nav.
+    // (0 = home, 1 = speaker/volume, 2 = close). Updated from Rust on gamepad nav.
     in-out property <int> focused_button: 0;
     // Current local time, formatted by Rust as "HH:MM".
     in property <string> clock_text: "";
+
+    // Speaker/volume submenu. When true and the speaker button (index 1) is
+    // focused, a small window appears on top of that button with a volume
+    // slider. Toggled from Rust on button activation (BTN_SOUTH).
+    in-out property <bool> speaker_submenu_open: false;
+    // Volume level 0..=100. Driven by the submenu slider (no OS integration).
+    in-out property <int> volume_level: 50;
 
     // Full-screen background; transparent where nothing is painted so the
     // desktop shows through (shm buffer starts zeroed = transparent).
@@ -88,7 +95,7 @@ export component Overlay inherits Window {
             border-color: #ffffff;
 
             Text {
-                text: "\u{e8b8}"; // settings
+                text: "\u{e04f}"; // speaker / volume
                 font-family: "Material Symbols Rounded";
                 font-size: 48px;
                 color: #ffffff;
@@ -115,6 +122,59 @@ export component Overlay inherits Window {
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
+        }
+    }
+
+    // Speaker / volume submenu: a small window on top of the speaker button
+    // (button index 1). Shows a volume slider navigable with left/right.
+    Rectangle {
+        visible: speaker_submenu_open && focused_button == 1;
+        // Speaker button top is at parent.height - 96px + 16px = parent.height - 80px.
+        // Place the submenu just above it, centered on the button.
+        x: parent.width / 2 - 70px;
+        y: parent.height - 80px - 160px - 10px;
+        width: 140px;
+        height: 160px;
+        background: #2a2a2a;
+        border-width: 2px;
+        border-color: #5ac8fa;
+
+        Text {
+            text: "VOLUME";
+            font-family: "Roboto";
+            font-size: 16px;
+            color: #ffffff;
+            x: 12px;
+            y: 14px;
+        }
+
+        // Volume value readout.
+        Text {
+            text: volume_level;
+            font-family: "Roboto";
+            font-size: 14px;
+            color: #b8b8c8;
+            x: parent.width - 24px;
+            y: 14px;
+            horizontal-alignment: right;
+        }
+
+        // Slider track.
+        Rectangle {
+            x: 20px;
+            y: 64px;
+            width: 100px;
+            height: 6px;
+            background: #555555;
+        }
+
+        // Slider thumb; position maps volume_level (0..=100) onto the track.
+        Rectangle {
+            x: 20px + (volume_level * 100px) / 100 - 6px;
+            y: 64px - 4px;
+            width: 12px;
+            height: 14px;
+            background: focused_button == 1 && speaker_submenu_open ? #3d8bff : #ffffff;
         }
     }
 }

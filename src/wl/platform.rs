@@ -165,7 +165,7 @@ pub fn install() -> Result<Rc<OverlayWindow>, PlatformError> {
 ///
 /// Two fonts are embedded:
 ///   - Roboto-Regular: the UI text font (mapped to the SansSerif generic family)
-///   - MaterialSymbolsRounded: a subsetted icon font (3 glyphs: home, settings,
+///   - MaterialSymbolsRounded: a subsetted icon font (3 glyphs: home, speaker,
 ///     close) used by the bottom bar buttons. Referenced by name from Slint.
 fn supply_fonts() -> Result<(), PlatformError> {
     use slint::fontique_012::fontique;
@@ -186,7 +186,7 @@ fn supply_fonts() -> Result<(), PlatformError> {
         roboto_fonts.iter().map(|(family_id, _)| *family_id),
     );
 
-    // Material Symbols Rounded — subsetted icon font (home, settings, close).
+    // Material Symbols Rounded — subsetted icon font (home, speaker, close).
     // Registered by name so Slint can resolve `font-family: "Material Symbols Rounded"`.
     let icons_data = include_bytes!("../../ui/fonts/MaterialSymbolsRounded.ttf");
     collection.register_fonts(
