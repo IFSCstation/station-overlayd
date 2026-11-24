@@ -20,16 +20,17 @@ export component Overlay inherits Window {
     }
 
     // Centralized bottom bar with 3 placeholder buttons.
+    // Bottom padding keeps the buttons clear of the screen's bottom edge.
     Rectangle {
         width: parent.width;
-        height: 56px;
-        y: parent.height - 56px;
+        height: 64px;
+        y: parent.height - 64px;
         background: #00000077;
 
         // 3 × 120 px buttons + 2 × 16 px gaps = 392 px wide; centered.
         Rectangle {
             x: parent.width / 2 - 196px;
-            y: 8px;
+            y: 12px;
             width: 120px;
             height: 40px;
             background: #2a2a2a;
@@ -42,7 +43,7 @@ export component Overlay inherits Window {
         }
         Rectangle {
             x: parent.width / 2 - 60px;
-            y: 8px;
+            y: 12px;
             width: 120px;
             height: 40px;
             background: #2a2a2a;
@@ -55,7 +56,7 @@ export component Overlay inherits Window {
         }
         Rectangle {
             x: parent.width / 2 + 76px;
-            y: 8px;
+            y: 12px;
             width: 120px;
             height: 40px;
             background: #2a2a2a;
