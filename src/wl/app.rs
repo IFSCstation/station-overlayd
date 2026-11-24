@@ -512,6 +512,18 @@ impl App {
                     self.hide_surface();
                     // Release pads when hiding (M3).
                     self.pad_manager.ungrab_all();
+                    // Reset transient UI state so a subsequent show starts
+                    // clean. Without this, hiding with the volume submenu open
+                    // leaves `speaker_submenu_open == true` while
+                    // `focused_button == 0`, which hijacks navigation into the
+                    // volume branch and makes BTN_SOUTH a no-op — the user is
+                    // effectively stuck.
+                    self.speaker_submenu_open = false;
+                    self.focused_button = 0;
+                    if let Some(ui) = self.ui.as_ref() {
+                        let _ = ui.set_speaker_submenu_open(false);
+                        let _ = ui.set_focused_button(0);
+                    }
                 }
                 Command::Redraw => {
                     self.request_frame_if_dirty();
@@ -593,6 +605,12 @@ impl App {
         // Reset button focus when the overlay is shown.
         self.focused_button = 0;
         let _ = self.ui.as_ref().map(|u| u.set_focused_button(0));
+        // Close any leftover submenu state from a previous session.
+        self.speaker_submenu_open = false;
+        let _ = self
+            .ui
+            .as_ref()
+            .map(|u| u.set_speaker_submenu_open(false));
         // Make sure the clock is current the moment the overlay appears.
         self.update_clock();
 
