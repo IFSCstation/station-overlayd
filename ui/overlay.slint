@@ -19,49 +19,49 @@ export component Overlay inherits Window {
         background: #000000cc;
     }
 
-    // Centralized bottom bar with 3 placeholder buttons.
+    // Centralized bottom bar with 3 placeholder square buttons.
     // Bottom padding keeps the buttons clear of the screen's bottom edge.
     Rectangle {
         width: parent.width;
-        height: 64px;
-        y: parent.height - 64px;
+        height: 96px;
+        y: parent.height - 96px;
         background: #00000077;
 
-        // 3 × 120 px buttons + 2 × 16 px gaps = 392 px wide; centered.
+        // 3 × 64px buttons + 2 × 16px gaps = 224px wide; centered.
         Rectangle {
-            x: parent.width / 2 - 196px;
-            y: 12px;
-            width: 120px;
-            height: 40px;
+            x: parent.width / 2 - 112px;
+            y: 16px;
+            width: 64px;
+            height: 64px;
             background: #2a2a2a;
             Text {
-                text: "Button 1";
+                text: "1";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
         }
         Rectangle {
-            x: parent.width / 2 - 60px;
-            y: 12px;
-            width: 120px;
-            height: 40px;
+            x: parent.width / 2 - 32px;
+            y: 16px;
+            width: 64px;
+            height: 64px;
             background: #2a2a2a;
             Text {
-                text: "Button 2";
+                text: "2";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
         }
         Rectangle {
-            x: parent.width / 2 + 76px;
-            y: 12px;
-            width: 120px;
-            height: 40px;
+            x: parent.width / 2 + 48px;
+            y: 16px;
+            width: 64px;
+            height: 64px;
             background: #2a2a2a;
             Text {
-                text: "Button 3";
+                text: "3";
                 color: #ffffff;
                 horizontal-alignment: center;
                 vertical-alignment: center;
