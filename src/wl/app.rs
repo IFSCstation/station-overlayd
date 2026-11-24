@@ -86,6 +86,8 @@ pub struct App {
     ipc_token: Option<RegistrationToken>,
     /// calloop registration token for periodic pad re-enumeration.
     pad_timer: Option<RegistrationToken>,
+    /// calloop registration token for the once-per-second clock refresh.
+    clock_timer: Option<RegistrationToken>,
     /// Gamepad manager (M2). Enumerates /dev/input, opens gamepads, dispatches
     /// pad events into the core state machine.
     pad_manager: crate::pad::PadManager,
@@ -156,6 +158,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         signal,
         ipc_token: None,
         pad_timer: None,
+        clock_timer: None,
         pad_manager: crate::pad::PadManager::new(),
         modules: crate::modules::ModuleRegistry::new(),
         state: core::State::new(),
@@ -211,6 +214,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         },
     )?;
     app.pad_timer = Some(pad_timer);
+
+    // Wall-clock timer: poll once per second so the top-right clock rolls
+    // over promptly at the minute boundary. update_clock() only redraws when
+    // the rendered text actually changes.
+    let clock_timer = loop_handle.insert_source(
+        Timer::from_duration(Duration::from_secs(1)),
+        move |_, _, app: &mut App| {
+            app.update_clock();
+            TimeoutAction::ToDuration(Duration::from_secs(1))
+        },
+    )?;
+    app.clock_timer = Some(clock_timer);
 
     event_loop.run(None, &mut app, |_| {})?;
 
@@ -525,6 +540,8 @@ impl App {
         // Reset button focus when the overlay is shown.
         self.focused_button = 0;
         let _ = self.ui.as_ref().map(|u| u.set_focused_button(0));
+        // Make sure the clock is current the moment the overlay appears.
+        self.update_clock();
 
         if self.layer.is_some() {
             // Already visible: just request a redraw.
@@ -581,6 +598,18 @@ impl App {
         slint::platform::update_timers_and_animations();
         self.request_frame_if_dirty();
         self.sync_slint_timer();
+    }
+
+    /// Refresh the top-right clock text from the system time. Only triggers a
+    /// redraw when the text actually changes (once per minute for `HH:MM`).
+    fn update_clock(&mut self) {
+        let text = local_clock_text();
+        if let Some(ui) = self.ui.as_ref() {
+            if ui.get_clock_text().as_str() != text.as_str() {
+                ui.set_clock_text(text.as_str().into());
+                self.request_frame_if_dirty();
+            }
+        }
     }
 
     /// Draw the Slint window into an attached buffer and commit it if dirty.
@@ -868,6 +897,25 @@ impl ProvidesRegistryState for App {
 smithay_client_toolkit::delegate_dispatch2!(App);
 smithay_client_toolkit::delegate_registry!(App);
 
+/// Current local time formatted as `HH:MM` for the top-right overlay clock.
+///
+/// Uses `localtime_r` so the clock follows the system timezone (and `TZ`)
+/// without pulling in a date/time crate. `nix` re-exports `libc` for this.
+fn local_clock_text() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as nix::libc::time_t;
+    let mut tm: nix::libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `localtime_r` fills `tm` from `secs` and does not retain the
+    // pointer. It is the thread-safe variant of `localtime`.
+    unsafe {
+        nix::libc::localtime_r(&secs, &mut tm);
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
 /// Map a normalized analog-stick value (−127..=127) to a discrete direction.
 /// Values inside the dead zone are treated as centered so small resting jitter
 /// does not move the focus.
@@ -906,6 +954,16 @@ mod tests {
     use super::logical_size_from_mode;
     use super::wl_output::Transform;
     use super::analog_direction;
+    use super::local_clock_text;
+
+    #[test]
+    fn clock_text_is_hh_mm() {
+        let text = local_clock_text();
+        assert_eq!(text.len(), 5, "clock text should be HH:MM, got {text:?}");
+        let (hour, minute) = text.split_once(':').expect("clock text has a colon");
+        assert!(hour.parse::<u32>().unwrap() < 24);
+        assert!(minute.parse::<u32>().unwrap() < 60);
+    }
 
     #[test]
     fn analog_direction_applies_dead_zone() {

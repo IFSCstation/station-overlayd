@@ -17,6 +17,8 @@ export component Overlay inherits Window {
     // Index of the currently focused bottom-bar button
     // (0 = home, 1 = settings, 2 = close). Updated from Rust on gamepad nav.
     in-out property <int> focused_button: 0;
+    // Current local time, formatted by Rust as "HH:MM".
+    in property <string> clock_text: "";
 
     // Full-screen background; transparent where nothing is painted so the
     // desktop shows through (shm buffer starts zeroed = transparent).
@@ -27,6 +29,20 @@ export component Overlay inherits Window {
         width: parent.width;
         height: parent.height;
         background: #000000cc;
+    }
+
+    // Clock in the top-right corner. The text is set from Rust and refreshed
+    // once per minute (the timer polls every second).
+    Text {
+        x: 0;
+        y: 16px;
+        width: parent.width - 24px;
+        height: 40px;
+        text: clock_text;
+        font-size: 30px;
+        color: #ffffff;
+        horizontal-alignment: right;
+        vertical-alignment: top;
     }
 
     // Centralized bottom bar with 3 placeholder circle buttons.
