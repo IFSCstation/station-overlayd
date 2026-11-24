@@ -1,3 +1,4 @@
+
 name: Build arm64 Debian package
 
 on:
@@ -13,16 +14,16 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04-arm
+    runs-on: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
 
       - name: Install build deps
         run: |
@@ -49,7 +50,7 @@ jobs:
           dpkg-deb --contents target/debian/*.deb
 
       - name: Upload .deb (direct, not zipped)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           path: target/debian/*.deb
           archive: false
