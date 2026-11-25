@@ -615,10 +615,24 @@ impl App {
         self.update_clock();
 
         if self.layer.is_some() {
-            // Already visible: just request a redraw.
+            // Already visible (e.g. Hud → Interactive switch): just redraw,
+            // don't re-run the entrance animation.
             self.request_frame_if_dirty();
             return Ok(());
         }
+
+        // Transitioning from hidden → visible: start the bottom bar off-screen
+        // and only flip `show_animation` to true after the first frame has
+        // been drawn (otherwise Slint renders the final position immediately
+        // and nothing animates). A short one-shot timer defers the flip.
+        let _ = self.ui.as_ref().map(|u| u.set_show_animation(false));
+        let _ = self.loop_handle.insert_source(
+            Timer::from_duration(Duration::from_millis(50)),
+            move |_, _, app: &mut App| {
+                let _ = app.ui.as_ref().map(|u| u.set_show_animation(true));
+                TimeoutAction::Drop
+            },
+        );
 
         // --- create the overlay surface ---------------------------------
         // Query the screen size right now (not from config): the user may
@@ -659,6 +673,8 @@ impl App {
         // Release Slint's extra strong reference on the component.
         if let Some(ui) = self.ui.as_ref() {
             let _ = ui.window().hide();
+            // Reset so the next show re-runs the entrance animation.
+            let _ = ui.set_show_animation(false);
         }
     }
 

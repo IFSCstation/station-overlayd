@@ -27,6 +27,11 @@ export component Overlay inherits Window {
     // Volume level 0..=100. Driven by the submenu slider and synced to the OS.
     in-out property <int> volume_level: 50;
 
+    // Set to true by Rust when the overlay is shown; drives the bottom bar's
+    // entrance animation (lean in from below the screen edge). Reset to false
+    // when hidden so the next show re-animates.
+    in-out property <bool> show_animation: false;
+
     // Full-screen background; transparent where nothing is painted so the
     // desktop shows through (shm buffer starts zeroed = transparent).
     background: transparent;
@@ -54,10 +59,16 @@ export component Overlay inherits Window {
 
     // Centralized bottom bar with 3 placeholder circle buttons.
     // Bottom padding keeps the buttons clear of the screen's bottom edge.
+    // Leans up from below the screen edge when the overlay is invoked.
     Rectangle {
         width: parent.width;
         height: 96px;
-        y: parent.height - 96px;
+        // Off-screen (below the bottom edge) until the entrance animation runs.
+        y: show_animation ? parent.height - 96px : parent.height;
+        animate y {
+            duration: 300ms;
+            easing: ease-out;
+        }
         // background: #00000077; (transparent)
 
         // 3 × 64px circle buttons + 2 × 16px gaps = 224px wide; centered.
