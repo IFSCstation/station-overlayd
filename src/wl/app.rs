@@ -630,6 +630,7 @@ impl App {
             Timer::from_duration(Duration::from_millis(50)),
             move |_, _, app: &mut App| {
                 let _ = app.ui.as_ref().map(|u| u.set_show_animation(true));
+                app.slint_tick();
                 TimeoutAction::Drop
             },
         );
