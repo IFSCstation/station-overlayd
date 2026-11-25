@@ -2,27 +2,34 @@
 //!
 //! Enumerates `/dev/input/event*` devices, opens gamepads, normalizes
 //! evdev codes into `core::PadEvent`s, and feeds them into the core state
-//! machine via calloop. Supports grab (EVIOCGRAB) while Interactive.
+//! machine via calloop. Watches `/dev/input` with inotify so pads are
+//! opened/removed as they are plugged in and out (hotplug). Supports grab
+//! (EVIOCGRAB) while Interactive, including pads connected mid-session.
 //!
 //! Each device FD is `dup()`ed: the `evdev::Device` owns the original FD
 //! (used for `fetch_events()` and `grab()`/`ungrab()`), while calloop's
 //! `Generic` source owns the duplicate FD (used only for poll notification).
 
 use std::collections::HashMap;
+use std::ffi::{CString, OsStr, OsString};
 use std::io;
-use std::os::fd::BorrowedFd;
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use calloop::generic::Generic;
-use calloop::{Interest, Mode, PostAction};
+use calloop::{Interest, Mode, PostAction, RegistrationToken};
 use evdev::{enumerate, AbsInfo, Device, EventSummary, KeyCode};
 use nix::fcntl::{self, OFlag};
+use nix::libc;
 use nix::sys::stat::Mode as StatMode;
 use nix::unistd::dup;
 
 use crate::core::{self, PadEventKind};
+
+/// Directory holding the evdev device nodes watched for hotplug.
+const INPUT_DIR: &str = "/dev/input";
 
 /// Normalized gamepad state, tracked per device for summon-detection.
 #[derive(Debug, Default, Clone, Copy)]
@@ -102,6 +109,9 @@ pub struct PadManager {
     /// calloop source tokens, keyed by device index, for removal on hotplug.
     tokens: HashMap<u8, calloop::RegistrationToken>,
     next_index: u8,
+    /// True while pads should be grabbed (Interactive). A pad plugged in
+    /// during this window is grabbed as soon as it is opened.
+    grabbed: bool,
 }
 
 impl PadManager {
@@ -112,6 +122,7 @@ impl PadManager {
             state: HashMap::new(),
             tokens: HashMap::new(),
             next_index: 0,
+            grabbed: false,
         }
     }
 
@@ -344,6 +355,15 @@ impl PadManager {
         self.tokens.insert(index, token);
 
         self.devices.insert(index, device);
+        // A pad connected while the overlay is Interactive must be grabbed
+        // immediately, otherwise the game keeps receiving its input.
+        if self.grabbed {
+            if let Some(device) = self.devices.get_mut(&index) {
+                if let Err(e) = device.grab() {
+                    eprintln!("[overlayd] pad: failed to grab {path:?}: {e}");
+                }
+            }
+        }
         self.paths.insert(index, path.to_path_buf());
         self.state.insert(
             index,
@@ -360,8 +380,7 @@ impl PadManager {
     }
 
     /// Remove a device on hotplug disconnect.
-    #[allow(dead_code)]
-    pub fn remove_device(
+    fn remove_device(
         &mut self,
         loop_handle: &calloop::LoopHandle<'static, crate::wl::app::App>,
         index: u8,
@@ -372,6 +391,26 @@ impl PadManager {
         self.devices.remove(&index);
         self.paths.remove(&index);
         self.state.remove(&index);
+    }
+
+    /// Remove the tracked device whose node is `path`, if any. Returns
+    /// whether a device was removed.
+    fn remove_device_by_path(
+        &mut self,
+        loop_handle: &calloop::LoopHandle<'static, crate::wl::app::App>,
+        path: &Path,
+    ) -> bool {
+        let index = self
+            .paths
+            .iter()
+            .find_map(|(&index, p)| (p.as_path() == path).then_some(index));
+        match index {
+            Some(index) => {
+                self.remove_device(loop_handle, index);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Check if an axis reading represents a state transition (press or
@@ -398,6 +437,7 @@ impl PadManager {
 
     /// Grab all pads (EVIOCGRAB). Called when entering Interactive (M3).
     pub fn grab_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.grabbed = true;
         for device in self.devices.values_mut() {
             device.grab()?;
         }
@@ -406,10 +446,158 @@ impl PadManager {
 
     /// Ungrab all pads. Called when leaving Interactive (M3).
     pub fn ungrab_all(&mut self) {
+        self.grabbed = false;
         for device in self.devices.values_mut() {
             let _ = device.ungrab();
         }
     }
+
+    /// Install an inotify watch on `/dev/input` so pads are opened/removed as
+    /// soon as their device nodes appear or disappear (PLAN.md §3).
+    ///
+    /// Returns the calloop registration token, or an error when inotify is
+    /// unavailable (caller can fall back to periodic polling).
+    pub fn watch_hotplug(
+        loop_handle: &calloop::LoopHandle<'static, crate::wl::app::App>,
+    ) -> Result<RegistrationToken, Box<dyn std::error::Error>> {
+        let fd = inotify_watch_input_dir()?;
+        let token = loop_handle.insert_source(
+            Generic::new(fd, Interest::READ, Mode::Level),
+            |_readiness,
+             fd: &mut calloop::generic::NoIoDrop<OwnedFd>,
+             app: &mut crate::wl::app::App| {
+                let events = match read_inotify_events(fd.as_raw_fd()) {
+                    Ok(events) => events,
+                    Err(e) => {
+                        eprintln!("[overlayd] pad: inotify read error: {e}");
+                        return Ok(PostAction::Continue);
+                    }
+                };
+
+                // Clone the handle so the pad manager can be borrowed mutably
+                // while we still need to remove/insert event sources.
+                let loop_handle = app.loop_handle().clone();
+                let mut should_enumerate = false;
+                for ev in events {
+                    if ev.mask & (libc::IN_DELETE | libc::IN_MOVED_FROM) != 0 {
+                        if let Some(name) = ev.name {
+                            let path = Path::new(INPUT_DIR).join(name);
+                            if app
+                                .pad_manager_mut()
+                                .remove_device_by_path(&loop_handle, &path)
+                            {
+                                eprintln!("[overlayd] pad: removed {path:?}");
+                            }
+                        }
+                    }
+                    // A node may have appeared, been replaced, or had its
+                    // permissions changed (e.g. logind ACL applied late).
+                    if ev.mask
+                        & (libc::IN_CREATE
+                            | libc::IN_MOVED_TO
+                            | libc::IN_ATTRIB
+                            | libc::IN_Q_OVERFLOW)
+                        != 0
+                    {
+                        should_enumerate = true;
+                    }
+                }
+
+                if should_enumerate {
+                    let opened = app.pad_manager_mut().enumerate(&loop_handle);
+                    if !opened.is_empty() {
+                        eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
+                    }
+                }
+                Ok(PostAction::Continue)
+            },
+        )?;
+        Ok(token)
+    }
+}
+
+/// One decoded inotify event (only the fields the pad layer needs).
+#[derive(Debug, PartialEq, Eq)]
+struct InotifyEvent {
+    mask: u32,
+    name: Option<OsString>,
+}
+
+/// Open an inotify instance and watch `/dev/input` for device node changes.
+fn inotify_watch_input_dir() -> io::Result<OwnedFd> {
+    // SAFETY: plain syscall; a non-negative return value is a fresh fd that
+    // `OwnedFd` takes ownership of and closes on drop.
+    let raw = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` was just returned by inotify_init1 and is uniquely owned.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    let dir = CString::new(INPUT_DIR).expect("static path contains no NUL");
+    let mask = libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_MOVED_TO
+        | libc::IN_MOVED_FROM
+        | libc::IN_ATTRIB;
+    // SAFETY: `dir` is a valid NUL-terminated path and `fd` is open.
+    let wd = unsafe { libc::inotify_add_watch(fd.as_raw_fd(), dir.as_ptr(), mask) };
+    if wd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+/// Drain all pending inotify events from `fd` (non-blocking).
+fn read_inotify_events(fd: RawFd) -> io::Result<Vec<InotifyEvent>> {
+    let mut buf = [0u8; 4096];
+    let mut events = Vec::new();
+    loop {
+        // SAFETY: `buf` is valid for writes of its full length.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            return match err.kind() {
+                io::ErrorKind::WouldBlock => Ok(events),
+                io::ErrorKind::Interrupted => continue,
+                _ => Err(err),
+            };
+        }
+        if n == 0 {
+            return Ok(events);
+        }
+        events.extend(parse_inotify_events(&buf[..n as usize]));
+    }
+}
+
+/// Decode the packed `inotify_event` records in `buf`.
+fn parse_inotify_events(buf: &[u8]) -> Vec<InotifyEvent> {
+    let header = std::mem::size_of::<libc::inotify_event>();
+    let mut events = Vec::new();
+    let mut offset = 0usize;
+    while offset + header <= buf.len() {
+        // SAFETY: the bounds check above guarantees a whole header is
+        // present; `read_unaligned` avoids assuming the buffer is aligned.
+        let raw = unsafe {
+            std::ptr::read_unaligned(buf.as_ptr().add(offset).cast::<libc::inotify_event>())
+        };
+        let name_len = raw.len as usize;
+        let start = offset + header;
+        let end = start.saturating_add(name_len).min(buf.len());
+        let name = if name_len > 0 && start < buf.len() {
+            let bytes = &buf[start..end];
+            let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            Some(OsStr::from_bytes(&bytes[..len]).to_os_string())
+        } else {
+            None
+        };
+        events.push(InotifyEvent {
+            mask: raw.mask,
+            name,
+        });
+        offset = start.saturating_add(name_len);
+    }
+    events
 }
 
 impl Default for PadManager {
@@ -544,5 +732,67 @@ mod tests {
         assert_eq!(normalize_axis(None, 5000), 127);
         assert_eq!(normalize_axis(None, -5000), -127);
         assert_eq!(normalize_axis(None, 0), 0);
+    }
+
+    #[test]
+    fn grab_state_tracks_interactive_mode() {
+        let mut pm = PadManager::new();
+        assert!(!pm.grabbed);
+        pm.grab_all().expect("grabbing zero devices is fine");
+        assert!(pm.grabbed);
+        pm.ungrab_all();
+        assert!(!pm.grabbed);
+    }
+
+    /// Append one packed `inotify_event` to `buf` (name is NUL-padded to 4).
+    fn push_inotify_event(buf: &mut Vec<u8>, mask: u32, name: Option<&[u8]>) {
+        let header = std::mem::size_of::<libc::inotify_event>();
+        let name_len = name.map_or(0, |n| (n.len() + 4) & !3);
+        let start = buf.len();
+        buf.resize(start + header + name_len, 0);
+
+        let wd_at = start + std::mem::offset_of!(libc::inotify_event, wd);
+        let mask_at = start + std::mem::offset_of!(libc::inotify_event, mask);
+        let len_at = start + std::mem::offset_of!(libc::inotify_event, len);
+        buf[wd_at..wd_at + 4].copy_from_slice(&1i32.to_ne_bytes());
+        buf[mask_at..mask_at + 4].copy_from_slice(&mask.to_ne_bytes());
+        buf[len_at..len_at + 4].copy_from_slice(&(name_len as u32).to_ne_bytes());
+        if let Some(name) = name {
+            buf[start + header..start + header + name.len()].copy_from_slice(name);
+        }
+    }
+
+    #[test]
+    fn parse_inotify_create_event() {
+        let mut buf = Vec::new();
+        push_inotify_event(&mut buf, libc::IN_CREATE, Some(b"event7"));
+        let events = parse_inotify_events(&buf);
+        assert_eq!(
+            events,
+            vec![InotifyEvent {
+                mask: libc::IN_CREATE,
+                name: Some(OsString::from("event7")),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_inotify_multiple_events() {
+        let mut buf = Vec::new();
+        push_inotify_event(&mut buf, libc::IN_DELETE, Some(b"event3"));
+        push_inotify_event(&mut buf, libc::IN_Q_OVERFLOW, None);
+        let events = parse_inotify_events(&buf);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].name.as_deref(), Some(OsStr::new("event3")));
+        assert_eq!(events[0].mask & libc::IN_DELETE, libc::IN_DELETE);
+        assert_eq!(events[1].name, None);
+        assert_eq!(events[1].mask & libc::IN_Q_OVERFLOW, libc::IN_Q_OVERFLOW);
+    }
+
+    #[test]
+    fn parse_inotify_ignores_partial_header() {
+        // A short/truncated buffer must not panic or produce bogus events.
+        let buf = vec![0u8; 4];
+        assert!(parse_inotify_events(&buf).is_empty());
     }
 }

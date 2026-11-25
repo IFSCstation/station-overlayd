@@ -85,7 +85,9 @@ pub struct App {
     signal: LoopSignal,
     /// calloop registration token for the IPC socket source.
     ipc_token: Option<RegistrationToken>,
-    /// calloop registration token for periodic pad re-enumeration.
+    /// calloop registration token for the inotify gamepad hotplug source.
+    pad_hotplug: Option<RegistrationToken>,
+    /// Fallback polling timer used when inotify is unavailable.
     pad_timer: Option<RegistrationToken>,
     /// calloop registration token for the once-per-second clock refresh.
     clock_timer: Option<RegistrationToken>,
@@ -162,6 +164,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         timer: None,
         signal,
         ipc_token: None,
+        pad_hotplug: None,
         pad_timer: None,
         clock_timer: None,
         pad_manager: crate::pad::PadManager::new(),
@@ -202,25 +205,35 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     )?;
     app.ipc_token = Some(ipc_token);
 
-    // --- Gamepad enumeration (M2) ---------------------------------------
+    // --- Gamepad enumeration + hotplug (M2) -----------------------------
+    // Install the inotify watch first so a pad appearing between watch setup
+    // and the initial enumeration is not missed.
+    match crate::pad::PadManager::watch_hotplug(&loop_handle) {
+        Ok(token) => app.pad_hotplug = Some(token),
+        Err(e) => {
+            // inotify can be unavailable in restricted environments; keep
+            // hotplug working with a low-frequency re-enumeration instead.
+            eprintln!(
+                "[overlayd] pad: inotify hotplug unavailable ({e}); falling back to 2s polling"
+            );
+            let pad_timer = loop_handle.insert_source(
+                Timer::from_duration(std::time::Duration::from_secs(2)),
+                move |_, _, app: &mut App| {
+                    let opened = app.pad_manager.enumerate(&app.loop_handle);
+                    if !opened.is_empty() {
+                        eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
+                    }
+                    TimeoutAction::ToDuration(std::time::Duration::from_secs(2))
+                },
+            )?;
+            app.pad_timer = Some(pad_timer);
+        }
+    }
+
     let opened = app.pad_manager.enumerate(&loop_handle);
     if !opened.is_empty() {
         eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
     }
-
-    // Periodic re-enumeration timer: detects reconnected gamepads so the
-    // overlay keeps working even when no pad is connected at startup.
-    let pad_timer = loop_handle.insert_source(
-        Timer::from_duration(std::time::Duration::from_secs(2)),
-        move |_, _, app: &mut App| {
-            let opened = app.pad_manager.enumerate(&app.loop_handle);
-            if !opened.is_empty() {
-                eprintln!("[overlayd] pad: {} gamepad(s) opened", opened.len());
-            }
-            TimeoutAction::ToDuration(std::time::Duration::from_secs(2))
-        },
-    )?;
-    app.pad_timer = Some(pad_timer);
 
     // Wall-clock timer: poll once per second so the top-right clock rolls
     // over promptly at the minute boundary. update_clock() only redraws when
@@ -481,6 +494,12 @@ impl App {
 
     pub(crate) fn pad_manager_mut(&mut self) -> &mut crate::pad::PadManager {
         &mut self.pad_manager
+    }
+
+    /// Cloneable handle to the event loop, used by pad hotplug callbacks that
+    /// must add/remove sources while borrowing the pad manager.
+    pub(crate) fn loop_handle(&self) -> &LoopHandle<'static, App> {
+        &self.loop_handle
     }
 
     /// Switch to a module by ID. Used by Ctx from Module::on_event.
