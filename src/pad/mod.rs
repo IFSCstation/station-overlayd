@@ -435,13 +435,29 @@ impl PadManager {
         }
     }
 
-    /// Grab all pads (EVIOCGRAB). Called when entering Interactive (M3).
+    /// Grab all pads (EVIOCGRAB) so their events no longer reach other apps
+    /// while the overlay is visible. Best-effort per device: one failure logs
+    /// and does not prevent the remaining pads from being grabbed.
     pub fn grab_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.grabbed = true;
-        for device in self.devices.values_mut() {
-            device.grab()?;
+        let mut first_error = None;
+        for (index, device) in self.devices.iter_mut() {
+            if let Err(e) = device.grab() {
+                let path = self
+                    .paths
+                    .get(index)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| format!("#{index}"));
+                eprintln!("[overlayd] pad: failed to grab {path}: {e}");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
         }
-        Ok(())
+        match first_error {
+            Some(e) => Err(Box::new(e)),
+            None => Ok(()),
+        }
     }
 
     /// Ungrab all pads. Called when leaving Interactive (M3).

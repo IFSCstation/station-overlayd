@@ -728,6 +728,13 @@ impl App {
         // Make sure the clock is current the moment the overlay appears.
         self.update_clock();
 
+        // Grab the gamepads so button presses drive the overlay instead of
+        // leaking through to the focused game/app. `PadManager` also grabs
+        // pads that are hotplugged while this flag is set; Hide releases them.
+        if let Err(e) = self.pad_manager.grab_all() {
+            eprintln!("overlayd: pad: grab failed: {e}");
+        }
+
         if self.layer.is_some() {
             // Already visible (e.g. Hud → Interactive switch): just redraw,
             // don't re-run the entrance animation.
