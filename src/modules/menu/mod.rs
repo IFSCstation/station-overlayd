@@ -38,8 +38,9 @@ impl Module for MenuModule {
                 core::PadEventKind::ButtonPressed(code) => match code {
                     // BTN_SOUTH → select / activate (hide overlay)
                     0x130 => (Handled::Yes, ModuleCommand::Hide),
-                    // BTN_EAST → back (hide overlay)
-                    0x134 => (Handled::Yes, ModuleCommand::Hide),
+                    // BTN_EAST/B → back (hide overlay); accept BTN_WEST/Y too
+                    // for pads that report the back button as 0x134.
+                    0x131 | 0x134 => (Handled::Yes, ModuleCommand::Hide),
                     _ => (Handled::No, ModuleCommand::None),
                 },
                 // Button releases are ignored for menu navigation.

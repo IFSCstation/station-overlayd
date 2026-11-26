@@ -36,6 +36,7 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use crate::audio;
 use crate::core::{self, Command, Event, Mode as CoreMode};
 use crate::ipc;
+use crate::power;
 use crate::wl::platform::{Argb8888, OverlayWindow};
 use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
@@ -98,13 +99,18 @@ pub struct App {
     modules: crate::modules::ModuleRegistry,
     /// The platform-independent state machine (PLAN.md §1).
     state: core::State,
-    /// Index of the currently focused bottom-bar button (0 = home, 1 = speaker/volume, 2 = close).
+    /// Index of the currently focused bottom-bar button
+    /// (0 = home, 1 = speaker/volume, 2 = power, 3 = close).
     /// Reset to 0 whenever the overlay is shown.
     focused_button: u8,
     /// Whether the speaker/volume submenu is open.
     speaker_submenu_open: bool,
     /// Volume level 0..=100 shown in the submenu slider (synced to the OS).
     volume_level: i32,
+    /// Whether the power submenu is open.
+    power_submenu_open: bool,
+    /// Selected power entry: 0 = shutdown, 1 = reboot.
+    power_selection: i32,
 }
 
 /// Connect, bind protocols, install the Slint platform, bind the IPC socket
@@ -173,6 +179,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         focused_button: 0,
         speaker_submenu_open: false,
         volume_level: 50,
+        power_submenu_open: false,
+        power_selection: 0,
     };
 
     app.sync_slint_timer();
@@ -312,6 +320,31 @@ impl App {
             if let core::Event::Pad(pad) = &ev {
                 match pad.kind {
                     core::PadEventKind::AxisMoved(code, value) => {
+                        // Power submenu: up/down moves the selection between
+                        // "Shutdown" and "Reboot". ABS_HAT0Y (0x11) is already
+                        // -1/0/1; ABS_Y (0x01) is normalized and needs the dead
+                        // zone.
+                        if self.power_submenu_open && (code == 0x11 || code == 0x01) {
+                            let dir = if code == 0x01 {
+                                analog_direction(value)
+                            } else {
+                                value
+                            };
+                            if let Some(pressed) = self.pad_manager.check_axis_transition(
+                                pad.device_index,
+                                code,
+                                dir,
+                            ) {
+                                if pressed && dir != 0 {
+                                    self.power_selection = if dir < 0 { 0 } else { 1 };
+                                    let _ = self.ui.as_ref().map(|u| {
+                                        u.set_power_selection(self.power_selection)
+                                    });
+                                    self.request_frame_if_dirty();
+                                }
+                            }
+                            return; // consumed while the power submenu is open
+                        }
                         if code == 0x10 || code == 0x00 {
                             // Hat values are already -1/0/1; the analog stick
                             // is normalized to -127..=127 and needs a dead zone
@@ -326,6 +359,12 @@ impl App {
                                     .check_axis_transition(pad.device_index, code, dir)
                             {
                                 if pressed {
+                                    // The power submenu only uses up/down; swallow
+                                    // left/right so focus (and the popup) stays put.
+                                    if self.power_submenu_open {
+                                        self.request_frame_if_dirty();
+                                        return; // consumed
+                                    }
                                     // When the speaker submenu is open, left/right
                                     // adjusts the volume slider instead of moving
                                     // button focus.
@@ -355,13 +394,13 @@ impl App {
                                     if dir < 0 {
                                         // Left: previous button (wrap around).
                                         self.focused_button = if self.focused_button == 0 {
-                                            2
+                                            3
                                         } else {
                                             self.focused_button - 1
                                         };
                                     } else {
                                         // Right: next button (wrap around).
-                                        self.focused_button = (self.focused_button + 1) % 3;
+                                        self.focused_button = (self.focused_button + 1) % 4;
                                     }
                                     let _ = self
                                         .ui
@@ -373,7 +412,40 @@ impl App {
                             }
                         }
                     }
-                    core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 2 => {
+                    core::PadEventKind::ButtonPressed(0x130)
+                        if self.focused_button == 2 && self.power_submenu_open =>
+                    {
+                        // Power submenu open: confirm the selected action.
+                        let action = if self.power_selection == 0 {
+                            power::Action::Shutdown
+                        } else {
+                            power::Action::Reboot
+                        };
+                        self.power_submenu_open = false;
+                        let _ = self
+                            .ui
+                            .as_ref()
+                            .map(|u| u.set_power_submenu_open(false));
+                        power::perform(action);
+                        self.hide_overlay();
+                        return; // consumed
+                    }
+                    core::PadEventKind::ButtonPressed(code)
+                        if (code == 0x131 || code == 0x134)
+                            && (self.power_submenu_open || self.speaker_submenu_open) =>
+                    {
+                        // BTN_EAST (B, 0x131; some pads report BTN_WEST/Y,
+                        // 0x134) cancels an open submenu without acting.
+                        self.power_submenu_open = false;
+                        self.speaker_submenu_open = false;
+                        if let Some(ui) = self.ui.as_ref() {
+                            let _ = ui.set_power_submenu_open(false);
+                            let _ = ui.set_speaker_submenu_open(false);
+                        }
+                        self.request_frame_if_dirty();
+                        return; // consumed
+                    }
+                    core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 3 => {
                         // Close button: hide the overlay.
                         self.hide_overlay();
                         return; // consumed
@@ -395,6 +467,17 @@ impl App {
                                     .as_ref()
                                     .map(|u| u.set_volume_level(level));
                             }
+                        }
+                        self.request_frame_if_dirty();
+                        return; // consumed
+                    }
+                    core::PadEventKind::ButtonPressed(0x130) if self.focused_button == 2 => {
+                        // Power button: open the submenu, starting on Shutdown.
+                        self.power_submenu_open = true;
+                        self.power_selection = 0;
+                        if let Some(ui) = self.ui.as_ref() {
+                            let _ = ui.set_power_submenu_open(true);
+                            let _ = ui.set_power_selection(0);
                         }
                         self.request_frame_if_dirty();
                         return; // consumed
@@ -445,8 +528,9 @@ impl App {
         let key = match code {
             // Xbox/PlayStation cross button → Return (activate)
             0x130 => Key::Return, // BTN_SOUTH
-            // Circle/B → Escape (back)
-            0x134 => Key::Escape, // BTN_EAST
+            // Circle/B → Escape (back). 0x131 = BTN_EAST/B; 0x134 is kept for
+            // pads that report the back button as BTN_WEST/Y.
+            0x131 | 0x134 => Key::Escape,
             // Start → Return
             0x13b => Key::Return, // BTN_START
             _ => return,
@@ -538,9 +622,13 @@ impl App {
                     // volume branch and makes BTN_SOUTH a no-op — the user is
                     // effectively stuck.
                     self.speaker_submenu_open = false;
+                    self.power_submenu_open = false;
+                    self.power_selection = 0;
                     self.focused_button = 0;
                     if let Some(ui) = self.ui.as_ref() {
                         let _ = ui.set_speaker_submenu_open(false);
+                        let _ = ui.set_power_submenu_open(false);
+                        let _ = ui.set_power_selection(0);
                         let _ = ui.set_focused_button(0);
                     }
                 }
@@ -626,10 +714,17 @@ impl App {
         let _ = self.ui.as_ref().map(|u| u.set_focused_button(0));
         // Close any leftover submenu state from a previous session.
         self.speaker_submenu_open = false;
+        self.power_submenu_open = false;
+        self.power_selection = 0;
         let _ = self
             .ui
             .as_ref()
             .map(|u| u.set_speaker_submenu_open(false));
+        let _ = self
+            .ui
+            .as_ref()
+            .map(|u| u.set_power_submenu_open(false));
+        let _ = self.ui.as_ref().map(|u| u.set_power_selection(0));
         // Make sure the clock is current the moment the overlay appears.
         self.update_clock();
 

@@ -30,7 +30,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "[overlayd] building profile=$BUILD_PROFILE"
-cargo build --"$BUILD_PROFILE" "${CARGO_ARGS[@]}"
+# Cargo has no `--debug` flag: the debug profile is the default. Only
+# `--release` needs to be passed explicitly.
+if [[ "$BUILD_PROFILE" == "release" ]]; then
+    cargo build --release "${CARGO_ARGS[@]}"
+else
+    cargo build "${CARGO_ARGS[@]}"
+fi
 
 BIN="target/$BUILD_PROFILE/overlayd"
 if [[ ! -x "$BIN" ]]; then

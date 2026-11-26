@@ -15,7 +15,8 @@ import "fonts/MaterialSymbolsRounded.ttf";
 
 export component Overlay inherits Window {
     // Index of the currently focused bottom-bar button
-    // (0 = home, 1 = speaker/volume, 2 = close). Updated from Rust on gamepad nav.
+    // (0 = home, 1 = speaker/volume, 2 = power, 3 = close).
+    // Updated from Rust on gamepad nav.
     in-out property <int> focused_button: 0;
     // Current local time, formatted by Rust as "HH:MM".
     in property <string> clock_text: "";
@@ -26,6 +27,13 @@ export component Overlay inherits Window {
     in-out property <bool> speaker_submenu_open: false;
     // Volume level 0..=100. Driven by the submenu slider and synced to the OS.
     in-out property <int> volume_level: 50;
+
+    // Power submenu. Uses the exact same window geometry/style as the volume
+    // submenu (above the power button, index 2). Lets the user shut down or
+    // reboot; the selected entry is confirmed with BTN_SOUTH.
+    in-out property <bool> power_submenu_open: false;
+    // Selected entry: 0 = shutdown, 1 = reboot.
+    in-out property <int> power_selection: 0;
 
     // Set to true by Rust when the overlay is shown; drives the bottom bar's
     // entrance animation (lean in from below the screen edge). Reset to false
@@ -71,10 +79,11 @@ export component Overlay inherits Window {
         }
         // background: #00000077; (transparent)
 
-        // 3 × 64px circle buttons + 2 × 16px gaps = 224px wide; centered.
+        // 4 × 64px circle buttons + 3 × 16px gaps = 304px wide; centered.
         // border-radius = half the size makes the rectangle a circle.
+        // Order: 0 = home, 1 = speaker/volume, 2 = power, 3 = close.
         Rectangle {
-            x: parent.width / 2 - 112px;
+            x: parent.width / 2 - 152px;
             y: 16px;
             width: 64px;
             height: 64px;
@@ -96,7 +105,7 @@ export component Overlay inherits Window {
         }
 
         Rectangle {
-            x: parent.width / 2 - 32px;
+            x: parent.width / 2 - 72px;
             y: 16px;
             width: 64px;
             height: 64px;
@@ -116,13 +125,54 @@ export component Overlay inherits Window {
         }
 
         Rectangle {
-            x: parent.width / 2 + 48px;
+            x: parent.width / 2 + 8px;
             y: 16px;
             width: 64px;
             height: 64px;
             border-radius: 32px;
             background: focused_button == 2 ? #3d8bff : #2a2a2a;
             border-width: focused_button == 2 ? 3px : 0px;
+            border-color: #ffffff;
+
+            // Power icon drawn from primitives (the embedded icon font is
+            // subsetted to home/speaker/close only): a ring with a gap at the
+            // top and a vertical stem through it.
+            Rectangle {
+                x: 16px;
+                y: 20px;
+                width: 32px;
+                height: 32px;
+                border-radius: 16px;
+                border-width: 3px;
+                border-color: #ffffff;
+                background: transparent;
+            }
+            // Mask the top of the ring to leave the classic power gap.
+            Rectangle {
+                x: 25px;
+                y: 14px;
+                width: 14px;
+                height: 14px;
+                background: focused_button == 2 ? #3d8bff : #2a2a2a;
+            }
+            // Vertical stem.
+            Rectangle {
+                x: 30px;
+                y: 12px;
+                width: 4px;
+                height: 22px;
+                background: #ffffff;
+            }
+        }
+
+        Rectangle {
+            x: parent.width / 2 + 88px;
+            y: 16px;
+            width: 64px;
+            height: 64px;
+            border-radius: 32px;
+            background: focused_button == 3 ? #3d8bff : #2a2a2a;
+            border-width: focused_button == 3 ? 3px : 0px;
             border-color: #ffffff;
 
             Text {
@@ -186,6 +236,75 @@ export component Overlay inherits Window {
             width: 12px;
             height: 14px;
             background: focused_button == 1 && speaker_submenu_open ? #3d8bff : #ffffff;
+        }
+    }
+
+    // Power submenu: exact same window geometry/style as the volume submenu,
+    // centered on the power button (index 2). Up/down selects, BTN_SOUTH
+    // confirms the shutdown/reboot action.
+    Rectangle {
+        visible: power_submenu_open && focused_button == 2;
+        // Power button center sits 40px right of the bar center; the window
+        // is 140px wide, so x = center + 40 - 70 = center - 30.
+        x: parent.width / 2 - 30px;
+        y: parent.height - 80px - 160px - 10px;
+        width: 140px;
+        height: 160px;
+        background: #2a2a2a;
+        border-width: 2px;
+        border-color: #5ac8fa;
+
+        Text {
+            text: "POWER";
+            font-family: "Roboto";
+            font-size: 16px;
+            color: #ffffff;
+            x: 12px;
+            y: 14px;
+        }
+
+        // Shutdown entry.
+        Rectangle {
+            x: 10px;
+            y: 46px;
+            width: parent.width - 20px;
+            height: 40px;
+            border-radius: 6px;
+            background: power_selection == 0 ? #3d8bff : transparent;
+
+            Text {
+                text: "Shutdown";
+                font-family: "Roboto";
+                font-size: 16px;
+                color: #ffffff;
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: parent.height;
+                vertical-alignment: center;
+            }
+        }
+
+        // Reboot entry.
+        Rectangle {
+            x: 10px;
+            y: 92px;
+            width: parent.width - 20px;
+            height: 40px;
+            border-radius: 6px;
+            background: power_selection == 1 ? #3d8bff : transparent;
+
+            Text {
+                text: "Reboot";
+                font-family: "Roboto";
+                font-size: 16px;
+                color: #ffffff;
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: parent.height;
+                vertical-alignment: center;
+            }
         }
     }
 }

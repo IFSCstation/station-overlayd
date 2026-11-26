@@ -14,6 +14,7 @@ mod core;
 mod ipc;
 mod modules;
 mod pad;
+mod power;
 mod wl;
 
 slint::include_modules!();
